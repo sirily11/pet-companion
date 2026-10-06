@@ -1,5 +1,7 @@
 # Companion packages
 
+Git tracks only README files and modeling scripts in this directory. Companion models, textures, previews, runtime JSON files, validation output, and ZIP packages are local assets supplied separately. Keep a complete companion folder locally to import it, run asset-dependent tests, or rebuild its ZIP.
+
 `orange-kitten/` is the editable companion folder. `orange-kitten.zip` is its portable runtime package. Neither is a resource of the app target. Open **Import pet companion** in the app (or press **⌘I**) and select either one.
 
 A successful import copies the runtime files into the app’s Application Support folder and activates the companion. The original folder or ZIP can then be moved or deleted. The saved companion is restored on launch. Importing another companion replaces the active one and ends its voice conversation. A failed import preserves the active companion.

@@ -39,6 +39,18 @@ models/
 *.blend
 *.blend[0-9]*
 
+# Companion packages: keep only scripts and README files in Git
+/companions/**
+!/companions/**/
+!/companions/**/README
+!/companions/**/README.md
+!/companions/**/README.txt
+!/companions/**/README.rst
+!/companions/**/*.py
+!/companions/**/*.sh
+!/companions/**/*.zsh
+!/companions/**/*.bash
+
 # Dependencies, generated website files, and caches
 node_modules/
 .next/
