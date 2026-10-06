@@ -51,8 +51,9 @@ final class FakeGatewaySocket: GatewaySocketTransport {
               let event = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return }
         sent.append(event)
         if event["type"] as? String == "session-update" {
-            // Reproduce the live Gateway failure when Gemini gets this override.
-            if let config = event["config"] as? [String: Any], config["turnDetection"] != nil {
+            // Both overrides reproduce confirmed live Gateway transform rejections.
+            if let config = event["config"] as? [String: Any],
+               config["turnDetection"] != nil || (config["providerOptions"] as? [String: Any])?["tools"] != nil {
                 closeCode = .policyViolation
                 closeReason = Data("WebSocket transform rejected frame".utf8)
                 throw NSError(domain: NSPOSIXErrorDomain, code: 57)
@@ -95,6 +96,82 @@ final class GatewayTests: XCTestCase {
         let token = try await api().createRealtimeToken(key: "test-key")
         XCTAssertEqual(GatewayAPI.realtimeProtocols(token: token), ["ai-gateway-realtime.v1", "ai-gateway-auth.vcst_test-secret"])
         XCTAssertEqual(GatewayAPI.realtimeURL().host, "ai-gateway.vercel.sh")
+    }
+
+    func testGoogleSearchUsesGroundedTextProtocolAndRejectsUngroundedAnswers() async throws {
+        GatewayURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v4/ai/language-model")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "ai-language-model-id"), GatewayAPI.searchModel)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "ai-language-model-specification-version"), "4")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "ai-language-model-streaming"), "false")
+            let body = try self.body(of: request)
+            let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+            XCTAssertEqual(tools.first?["type"] as? String, "provider")
+            XCTAssertEqual(tools.first?["id"] as? String, "google.google_search")
+            return (200, Data(#"{"content":[{"type":"text","text":"Verified weather."},{"type":"source","sourceType":"url","url":"https://www.hko.gov.hk/","title":"Hong Kong Observatory"},{"type":"source","sourceType":"url","url":"javascript:alert(1)"}]}"#.utf8))
+        }
+        let result = try await api().searchWeb(key: "test-key", query: "Hong Kong weather")
+        XCTAssertEqual(result.text, "Verified weather.")
+        XCTAssertEqual(result.sources.map(\.title), ["Hong Kong Observatory"])
+        GatewayURLProtocol.handler = { _ in (200, Data(#"{"content":[{"type":"text","text":"An unverified answer."}]}"#.utf8)) }
+        do {
+            _ = try await api().searchWeb(key: "test-key", query: "Hong Kong weather")
+            XCTFail("Search answers need verified source links")
+        } catch { XCTAssertTrue(error is GatewayError) }
+    }
+
+    @MainActor func testRealtimeSearchFunctionReturnsSourcesAndKeepsConnectionOnSearchFailure() async throws {
+        var searchRequests = 0
+        GatewayURLProtocol.handler = { request in
+            if request.url?.path == "/v1/realtime/client-secrets" {
+                return (200, Data(#"{"token":"vcst_test-secret"}"#.utf8))
+            }
+            searchRequests += 1
+            if searchRequests == 1 {
+                return (200, Data(#"{"content":[{"type":"text","text":"Verified weather."},{"type":"source","sourceType":"url","url":"https://www.hko.gov.hk/","title":"Hong Kong Observatory"}]}"#.utf8))
+            }
+            return (503, Data("private-provider-details".utf8))
+        }
+        let socket = FakeGatewaySocket()
+        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        client.companion = try TestCompanion.package()
+        client.automaticallyChoosePoses = false
+        let ready = expectation(description: "Search session ready")
+        client.onReady = { ready.fulfill() }
+        await client.connect(key: "test-key")
+        await fulfillment(of: [ready], timeout: 2)
+        let call: [String: Any] = ["type": "function-call-arguments-done", "name": "web_search", "callId": "search-1",
+            "arguments": #"{"query":"Hong Kong weather"}"#]
+        client.handleEvent(call)
+        client.handleEvent(call)
+        func waitForOutput(_ callID: String) async throws -> [String: Any] {
+            for _ in 0..<100 {
+                if let item = socket.sent.compactMap({ $0["item"] as? [String: Any] }).first(where: { $0["callId"] as? String == callID }),
+                   let output = item["output"] as? String {
+                    XCTAssertEqual(item["type"] as? String, "function-call-output")
+                    XCTAssertEqual(item["name"] as? String, "web_search")
+                    return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTFail("Search output was not returned to Gemini")
+            return [:]
+        }
+        let output = try await waitForOutput("search-1")
+        XCTAssertEqual(output["text"] as? String, "Verified weather.")
+        XCTAssertEqual(searchRequests, 1, "Duplicate function events must not repeat billed search requests")
+        client.handleEvent(["type": "audio-transcript-delta", "delta": "Here's the weather."])
+        XCTAssertTrue(client.hasSearched)
+        XCTAssertEqual(client.messages.last?.sources.first?.title, "Hong Kong Observatory")
+        client.handleEvent(["type": "response-done"])
+        var failedCall = call
+        failedCall["callId"] = "search-2"
+        client.handleEvent(failedCall)
+        let failure = try await waitForOutput("search-2")
+        XCTAssertNotNil(failure["error"])
+        XCTAssertFalse(String(describing: failure).contains("private-provider-details"))
+        XCTAssertEqual(client.state, .connected, "Search errors must not end the voice session")
+        client.disconnect()
     }
 
     func testNativeJevUsesChoicesAndRejectsUnknownPose() async throws {
@@ -283,9 +360,13 @@ final class GatewayTests: XCTestCase {
         XCTAssertEqual((config["inputAudioFormat"] as? [String: Any])?["rate"] as? Int, 16000)
         XCTAssertEqual((config["outputAudioFormat"] as? [String: Any])?["rate"] as? Int, 24000)
         XCTAssertNil(config["turnDetection"], "Gemini must use its default VAD to avoid Gateway rejecting setup")
-        let provider = try XCTUnwrap(config["providerOptions"] as? [String: Any])
-        let tools = try XCTUnwrap(provider["tools"] as? [[String: Any]])
-        XCTAssertNotNil(tools.first?["googleSearch"] as? [String: Any], "Native search must be enabled in Gemini setup")
+        let providerOptions = try XCTUnwrap(config["providerOptions"] as? [String: Any])
+        XCTAssertNil(providerOptions["tools"], "Native Google tools are rejected by Gateway's realtime transform")
+        let googleOptions = try XCTUnwrap(providerOptions["google"] as? [String: Any])
+        XCTAssertEqual(googleOptions["defaultToolBehavior"] as? String, "BLOCKING")
+        let tools = try XCTUnwrap(config["tools"] as? [[String: Any]])
+        XCTAssertEqual(tools.first?["type"] as? String, "function")
+        XCTAssertEqual(tools.first?["name"] as? String, "web_search")
         let audio = expectation(description: "Audio played")
         client.onAudio = { bytes in XCTAssertEqual(bytes, Data([0, 0, 1, 0])); audio.fulfill() }
         let interrupted = expectation(description: "Playback interrupted")

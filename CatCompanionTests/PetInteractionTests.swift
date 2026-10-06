@@ -209,22 +209,109 @@ final class PetInteractionTests: XCTestCase {
             character.onInteraction = { interactions.append($0) }
             let (view, window, point) = makeStage(character, isDesktopPet: desktop)
             defer { view.cancelInteraction(); window.contentView = nil }
+            let origin = window.frame.origin
             let time = ProcessInfo.processInfo.systemUptime
-            view.mouseDown(with: try mouse(.leftMouseDown, point: point, time: time, window: window))
+            let modifiers: NSEvent.ModifierFlags = desktop ? .shift : []
+            view.mouseDown(with: try mouse(.leftMouseDown, point: point, time: time, window: window, modifiers: modifiers))
             for step in 1...20 {
                 view.mouseDragged(with: try mouse(.leftMouseDragged,
-                    point: CGPoint(x: point.x + CGFloat(step), y: point.y), time: time + Double(step) * 0.08, window: window))
+                    point: CGPoint(x: point.x + CGFloat(step), y: point.y), time: time + Double(step) * 0.08,
+                    window: window, modifiers: modifiers))
             }
-            view.mouseUp(with: try mouse(.leftMouseUp, point: CGPoint(x: point.x + 20, y: point.y), time: time + 1.8, window: window))
+            view.mouseUp(with: try mouse(.leftMouseUp, point: CGPoint(x: point.x + 20, y: point.y),
+                time: time + 1.8, window: window, modifiers: modifiers))
             XCTAssertEqual(interactions, [.petting])
+            XCTAssertEqual(window.frame.origin, origin)
         }
+    }
+
+    @MainActor func testDesktopModelDragMovesPanelWithoutSendingAPetReaction() throws {
+        let character = CatSceneController(package: try TestCompanion.package(), animate: false, stage: .desktop)
+        var interactions: [PetReaction] = []
+        character.onInteraction = { interactions.append($0) }
+        let (view, window, point) = makeStage(character, isDesktopPet: true)
+        let panel = try XCTUnwrap(window as? DesktopPetPanel)
+        defer { view.cancelInteraction(); window.contentView = nil }
+        let origin = window.frame.origin
+        let pointer = window.convertPoint(toScreen: point)
+        let time = ProcessInfo.processInfo.systemUptime
+        view.mouseDown(with: try mouse(.leftMouseDown, point: point, time: time, window: window))
+        view.mouseDragged(with: try mouse(.leftMouseDragged,
+            point: CGPoint(x: point.x + 80, y: point.y + 40), time: time + 0.1, window: window))
+        XCTAssertEqual(window.frame.origin.x, origin.x + 80, accuracy: 0.01)
+        XCTAssertEqual(window.frame.origin.y, origin.y + 40, accuracy: 0.01)
+        XCTAssertTrue(panel.isDraggingPet)
+        XCTAssertFalse(panel.ignoresMouseEvents)
+        XCTAssertFalse(view.hasActiveContact)
+        XCTAssertFalse(character.hasActiveInteraction)
+
+        // Subsequent events are relative to the window's new position.
+        let target = CGPoint(x: pointer.x + 150, y: pointer.y - 30)
+        view.mouseDragged(with: try mouse(.leftMouseDragged,
+            point: window.convertPoint(fromScreen: target), time: time + 0.2, window: window))
+        XCTAssertEqual(window.frame.origin.x, origin.x + 150, accuracy: 0.01)
+        XCTAssertEqual(window.frame.origin.y, origin.y - 30, accuracy: 0.01)
+        view.mouseUp(with: try mouse(.leftMouseUp,
+            point: window.convertPoint(fromScreen: target), time: time + 0.3, window: window))
+        XCTAssertFalse(panel.isDraggingPet)
+        XCTAssertTrue(interactions.isEmpty)
+    }
+
+    @MainActor func testDesktopClickJitterAndHoldInteractWithoutMovingPanel() throws {
+        let character = CatSceneController(package: try TestCompanion.package(), animate: false, stage: .desktop)
+        var interactions: [PetReaction] = []
+        character.onInteraction = { interactions.append($0) }
+        let (view, window, point) = makeStage(character, isDesktopPet: true)
+        let panel = try XCTUnwrap(window as? DesktopPetPanel)
+        defer { view.cancelInteraction(); window.contentView = nil }
+        let origin = window.frame.origin
+        let time = ProcessInfo.processInfo.systemUptime
+        let jitter = CGPoint(x: point.x + 4, y: point.y + 2)
+        view.mouseDown(with: try mouse(.leftMouseDown, point: point, time: time, window: window))
+        view.mouseDragged(with: try mouse(.leftMouseDragged, point: jitter, time: time + 0.05, window: window))
+        XCTAssertFalse(panel.isDraggingPet)
+        XCTAssertTrue(view.hasActiveContact)
+        view.mouseUp(with: try mouse(.leftMouseUp, point: jitter, time: time + 0.1, window: window))
+        XCTAssertEqual(interactions, [.tap])
+        character.clearInteraction()
+        view.mouseDown(with: try mouse(.leftMouseDown, point: point, time: time + 1, window: window))
+        view.mouseUp(with: try mouse(.leftMouseUp, point: point, time: time + 1.7, window: window))
+        XCTAssertEqual(interactions, [.tap, .longPress])
+        XCTAssertEqual(window.frame.origin, origin)
+        XCTAssertFalse(panel.isDraggingPet)
+        XCTAssertFalse(view.hasActiveContact)
+        XCTAssertFalse(view.allowsCameraControl)
+    }
+
+    @MainActor func testDesktopDragCancellationRestoresClickHandling() throws {
+        let character = CatSceneController(package: try TestCompanion.package(), animate: false, stage: .desktop)
+        var interactions: [PetReaction] = []
+        character.onInteraction = { interactions.append($0) }
+        let (view, window, point) = makeStage(character, isDesktopPet: true)
+        let panel = try XCTUnwrap(window as? DesktopPetPanel)
+        defer { view.cancelInteraction(); window.contentView = nil }
+        let time = ProcessInfo.processInfo.systemUptime
+        view.mouseDown(with: try mouse(.leftMouseDown, point: point, time: time, window: window))
+        view.mouseDragged(with: try mouse(.leftMouseDragged,
+            point: CGPoint(x: point.x + 80, y: point.y), time: time + 0.1, window: window))
+        XCTAssertTrue(panel.isDraggingPet)
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertFalse(panel.isDraggingPet)
+        XCTAssertFalse(view.hasActiveContact)
+        XCTAssertFalse(character.hasActiveInteraction)
+        XCTAssertTrue(interactions.isEmpty)
+        view.mouseDown(with: try mouse(.leftMouseDown, point: point, time: time + 1, window: window))
+        view.mouseUp(with: try mouse(.leftMouseUp, point: point, time: time + 1.1, window: window))
+        XCTAssertEqual(interactions, [.tap])
     }
 
     @MainActor private func makeStage(_ character: CatSceneController, isDesktopPet: Bool = false) -> (PetSceneView, NSWindow, CGPoint) {
         let view = PetSceneView(controller: character, isDesktopPet: isDesktopPet)
         view.frame = CGRect(x: 0, y: 0, width: 600, height: 600)
-        view.scene = character.scene; view.pointOfView = character.camera; view.allowsCameraControl = true
-        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        view.scene = character.scene; view.pointOfView = character.camera; view.allowsCameraControl = !isDesktopPet
+        let window = isDesktopPet
+            ? DesktopPetPanel(contentRect: view.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            : NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         _ = view.snapshot()
         let center = view.projectPoint(SCNVector3(0, 0.15, 0.08))

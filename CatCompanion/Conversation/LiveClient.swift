@@ -6,6 +6,31 @@ struct ConversationLine: Identifiable {
     let role: String
     var text: String
     var sources: [WebSource] = []
+    var toolCall: ConversationToolCall? = nil
+}
+
+struct ConversationToolCall: Equatable {
+    enum Status: String {
+        case running = "Running"
+        case completed = "Completed"
+        case failed = "Failed"
+        case cancelled = "Cancelled"
+
+        var symbol: String {
+            switch self {
+            case .running: "magnifyingglass"
+            case .completed: "checkmark.circle"
+            case .failed: "exclamationmark.circle"
+            case .cancelled: "xmark.circle"
+            }
+        }
+    }
+
+    let callID: String
+    let name: String
+    let query: String?
+    var status: Status = .running
+    var result: String? = nil
 }
 
 struct WebSource: Identifiable, Hashable {
@@ -46,6 +71,8 @@ final class LiveClient: ObservableObject {
     @Published private(set) var poseSource = "Manual"
     @Published private(set) var poseConfidence: Double?
     @Published private(set) var hasSearched = false
+    @Published private(set) var isSearching = false
+    @Published private(set) var visibleToolCalls: [ConversationToolCall] = []
     var automaticallyChoosePoses = true {
         didSet {
             if !automaticallyChoosePoses { poseTask?.cancel(); poseTask = nil; poseSource = "Manual"; poseRevision += 1 }
@@ -68,6 +95,10 @@ final class LiveClient: ObservableObject {
     private var receiveTask: Task<Void, Never>?
     private var sendTask: Task<Void, Never>?
     private var poseTask: Task<Void, Never>?
+    private var searchTasks: [String: Task<Void, Never>] = [:]
+    private var toolCallExpiryTasks: [String: Task<Void, Never>] = [:]
+    private var handledSearchCalls = Set<String>()
+    private var cancelledSearchCalls = Set<String>()
     private var sessionGeneration = UUID()
     private var assistantIndex: Int?
     private var timeout: Task<Void, Never>?
@@ -136,12 +167,21 @@ final class LiveClient: ObservableObject {
         receiveTask?.cancel(); receiveTask = nil
         sendTask?.cancel(); sendTask = nil
         poseTask?.cancel(); poseTask = nil
+        for task in searchTasks.values { task.cancel() }
+        for task in toolCallExpiryTasks.values { task.cancel() }
+        toolCallExpiryTasks = [:]
+        visibleToolCalls = []
+        for index in messages.indices where messages[index].toolCall?.status == .running {
+            messages[index].toolCall?.status = .cancelled
+            messages[index].toolCall?.result = "The conversation ended before the tool finished."
+        }
+        searchTasks = [:]; handledSearchCalls = []; cancelledSearchCalls = []
         socket?.cancel(with: .normalClosure, reason: nil); socket = nil
         state = .disconnected
         assistantIndex = nil
         poseSource = "Manual"; poseConfidence = nil
         activeKey = ""; outputTranscript = ""
-        responseSources = []; hasSearched = false
+        responseSources = []; hasSearched = false; isSearching = false
         pendingAudioBytes = 0; poseRevision += 1
         onDisconnect?()
     }
@@ -190,7 +230,8 @@ final class LiveClient: ObservableObject {
         // Gemini responds to conversation-item-create; no duplicate response-create.
     }
 
-    private func send(_ value: [String: Any], duringSetup: Bool = false, audioBytes: Int = 0) {
+    private func send(_ value: [String: Any], duringSetup: Bool = false, audioBytes: Int = 0,
+                      searchCallID: String? = nil) {
         guard (state == .connected || duringSetup), let socket,
               let data = try? JSONSerialization.data(withJSONObject: value),
               let string = String(data: data, encoding: .utf8) else { return }
@@ -200,6 +241,7 @@ final class LiveClient: ObservableObject {
         sendTask = Task { [weak self] in
             await previous?.value
             guard !Task.isCancelled, self?.sessionGeneration == token else { return }
+            if let searchCallID, self?.cancelledSearchCalls.contains(searchCallID) != false { return }
             if audioBytes > 0, self?.canSendAudio?() == false {
                 self?.pendingAudioBytes -= audioBytes
                 return
@@ -258,7 +300,10 @@ final class LiveClient: ObservableObject {
             if !outputTranscript.isEmpty { addHistory(role: "assistant", text: outputTranscript) }
             outputTranscript = ""; assistantIndex = nil; responseSources = []
             onResponseDone?()
-        case "speech-started": onInterruption?(); outputTranscript = ""; assistantIndex = nil; responseSources = []
+        case "speech-started":
+            onInterruption?(); outputTranscript = ""; assistantIndex = nil; responseSources = []
+        case "function-call-arguments-done": handleSearchCall(event)
+        case "custom": cancelSearchCalls(event)
         case "error":
             // Do not echo arbitrary provider text that might contain request details.
             fail("Gemini Live reported an error. Check your Gateway key, credits, and model access in Settings.")
@@ -269,6 +314,102 @@ final class LiveClient: ObservableObject {
             messages.removeFirst(count)
             assistantIndex = assistantIndex.map { $0 - count }
         }
+    }
+
+    private func handleSearchCall(_ event: [String: Any]) {
+        guard state == .connected, event["name"] as? String == "web_search",
+              let callID = event["callId"] as? String, !callID.isEmpty, callID.count <= 200,
+              !handledSearchCalls.contains(callID) else { return }
+        handledSearchCalls.insert(callID)
+        let arguments = event["arguments"] as? String
+        let object: [String: Any]?
+        if let arguments, arguments.utf8.count <= 8000 {
+            object = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8))) as? [String: Any]
+        } else { object = nil }
+        let query = (object?["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let call = ConversationToolCall(callID: callID, name: "web_search",
+                                       query: query.map { String($0.prefix(4000)) })
+        messages.append(.init(role: "tool", text: "", toolCall: call))
+        visibleToolCalls.append(call)
+        guard handledSearchCalls.count <= 64, searchTasks.count < 3,
+              let query, !query.isEmpty else {
+            sendSearchOutput(callID: callID, result: ["error": "Search is unavailable for this request. Ask for a concise search query."])
+            return
+        }
+        let generation = sessionGeneration
+        let key = activeKey
+        searchTasks[callID] = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.sessionGeneration == generation {
+                    self.searchTasks[callID] = nil
+                    self.isSearching = !self.searchTasks.isEmpty
+                }
+            }
+            do {
+                let result = try await self.api.searchWeb(key: key, query: query)
+                guard !Task.isCancelled, self.sessionGeneration == generation else { return }
+                self.hasSearched = true
+                for source in result.sources where !self.responseSources.contains(where: { $0.id == source.id }) && self.responseSources.count < 12 {
+                    self.responseSources.append(source)
+                }
+                if let index = self.assistantIndex, self.messages.indices.contains(index) {
+                    self.messages[index].sources = self.responseSources
+                }
+                self.sendSearchOutput(callID: callID, result: ["text": result.text,
+                    "sources": result.sources.map { ["url": $0.url.absoluteString, "title": $0.title] }],
+                    sources: result.sources)
+            } catch {
+                guard !Task.isCancelled, self.sessionGeneration == generation else { return }
+                self.sendSearchOutput(callID: callID, result: ["error": "Web search is unavailable. Tell the user you could not verify current information."])
+            }
+        }
+        isSearching = true
+    }
+
+    private func cancelSearchCalls(_ event: [String: Any]) {
+        guard event["rawType"] as? String == "toolCallCancellation",
+              let raw = event["raw"] as? [String: Any],
+              let cancellation = raw["toolCallCancellation"] as? [String: Any],
+              let callIDs = cancellation["ids"] as? [String] else { return }
+        for callID in callIDs.prefix(64) where handledSearchCalls.contains(callID) {
+            cancelledSearchCalls.insert(callID)
+            searchTasks.removeValue(forKey: callID)?.cancel()
+            updateToolCall(callID: callID, status: .cancelled, result: "The tool call was cancelled.")
+        }
+        isSearching = !searchTasks.isEmpty
+    }
+
+    private func updateToolCall(callID: String, status: ConversationToolCall.Status,
+                                result: String?, sources: [WebSource] = []) {
+        if let index = messages.lastIndex(where: { $0.toolCall?.callID == callID }) {
+            messages[index].toolCall?.status = status
+            messages[index].toolCall?.result = result
+            messages[index].sources = sources
+        }
+        guard let index = visibleToolCalls.firstIndex(where: { $0.callID == callID }) else { return }
+        visibleToolCalls[index].status = status
+        visibleToolCalls[index].result = result
+        toolCallExpiryTasks.removeValue(forKey: callID)?.cancel()
+        guard status != .running else { return }
+        // Keep the outcome beside the pet's reply briefly, then remove only its bubble.
+        let generation = sessionGeneration
+        toolCallExpiryTasks[callID] = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(6)) }
+            catch { return }
+            guard let self, !Task.isCancelled, self.sessionGeneration == generation else { return }
+            self.visibleToolCalls.removeAll { $0.callID == callID }
+            self.toolCallExpiryTasks[callID] = nil
+        }
+    }
+
+    private func sendSearchOutput(callID: String, result: [String: Any], sources: [WebSource] = []) {
+        let failure = result["error"] as? String
+        updateToolCall(callID: callID, status: failure == nil ? .completed : .failed,
+                       result: failure ?? result["text"] as? String, sources: sources)
+        guard let data = try? JSONSerialization.data(withJSONObject: result) else { return }
+        send(["type": "conversation-item-create", "item": ["type": "function-call-output",
+            "callId": callID, "name": "web_search", "output": String(decoding: data, as: UTF8.self)]], searchCallID: callID)
     }
 
     private func captureGrounding(_ event: [String: Any]) {

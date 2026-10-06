@@ -372,6 +372,9 @@ private struct ConversationPanel: View {
                             }.padding(.top, 48).padding(.bottom, 24)
                         }
                         ForEach(live.messages) { line in
+                            if let call = line.toolCall {
+                                ConversationToolCallView(call: call, sources: line.sources)
+                            } else {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(line.role == "user" ? "YOU" : coordinator.character.package?.manifest.name.uppercased() ?? "PET").font(.system(size: 9, weight: .semibold)).tracking(1.8).foregroundStyle(accent)
                                 Text(line.text).font(.system(size: 13)).lineSpacing(4).textSelection(.enabled)
@@ -385,10 +388,12 @@ private struct ConversationPanel: View {
                                 }
                             }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(line.role == "user" ? .white.opacity(0.7) : accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+                            }
                         }
                         Color.clear.frame(height: 1).id("end")
                     }
                 }
+                .onChange(of: live.messages.last?.id) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
                 .onChange(of: live.messages.last?.text) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
             }
             if let error = live.error {
@@ -440,14 +445,57 @@ private struct ConversationPanel: View {
                             .frame(height: 28)
                     }
                 }
-                Label(live.hasSearched ? "Searched the web" : "Web search available", systemImage: "globe")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
             }
         }.padding(24).background(Color.white.opacity(0.25))
     }
     private func send() {
         live.sendText(draft)
         draft = ""
+    }
+}
+
+private struct ConversationToolCallView: View {
+    let call: ConversationToolCall
+    let sources: [WebSource]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("TOOL CALL", systemImage: "wrench.and.screwdriver")
+                    .font(.system(size: 9, weight: .semibold)).tracking(1.4)
+                Spacer()
+                if call.status == .running { ProgressView().controlSize(.mini) }
+                Label(call.status.rawValue, systemImage: call.status.symbol)
+                    .font(.system(size: 10))
+            }.foregroundStyle(call.status == .failed ? Color.red : accent)
+            Text(call.name).font(.system(size: 12, weight: .medium, design: .monospaced))
+                .textSelection(.enabled)
+            if let query = call.query, !query.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Query").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                    Text(query).font(.system(size: 12)).lineSpacing(3).textSelection(.enabled)
+                }
+            }
+            if let result = call.result, !result.isEmpty {
+                if call.status == .completed {
+                    DisclosureGroup("Result") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(result).lineSpacing(3).textSelection(.enabled)
+                            ForEach(sources) { source in
+                                Link(destination: source.url) {
+                                    Label(source.title, systemImage: "link").lineLimit(2)
+                                }
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                    }.font(.system(size: 11))
+                } else {
+                    Text(result).font(.system(size: 11)).foregroundStyle(.secondary)
+                        .lineSpacing(3).textSelection(.enabled)
+                }
+            }
+        }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
+            .background(ink.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.opacity(0.08)))
     }
 }
 
