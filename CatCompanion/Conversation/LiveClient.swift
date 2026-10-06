@@ -68,6 +68,8 @@ final class LiveClient: ObservableObject {
     private var receiveTask: Task<Void, Never>?
     private var sendTask: Task<Void, Never>?
     private var poseTask: Task<Void, Never>?
+    private var searchTasks: [String: Task<Void, Never>] = [:]
+    private var handledSearchCalls = Set<String>()
     private var sessionGeneration = UUID()
     private var assistantIndex: Int?
     private var timeout: Task<Void, Never>?
@@ -136,6 +138,8 @@ final class LiveClient: ObservableObject {
         receiveTask?.cancel(); receiveTask = nil
         sendTask?.cancel(); sendTask = nil
         poseTask?.cancel(); poseTask = nil
+        for task in searchTasks.values { task.cancel() }
+        searchTasks = [:]; handledSearchCalls = []
         socket?.cancel(with: .normalClosure, reason: nil); socket = nil
         state = .disconnected
         assistantIndex = nil
@@ -259,6 +263,7 @@ final class LiveClient: ObservableObject {
             outputTranscript = ""; assistantIndex = nil; responseSources = []
             onResponseDone?()
         case "speech-started": onInterruption?(); outputTranscript = ""; assistantIndex = nil; responseSources = []
+        case "function-call-arguments-done": handleSearchCall(event)
         case "error":
             // Do not echo arbitrary provider text that might contain request details.
             fail("Gemini Live reported an error. Check your Gateway key, credits, and model access in Settings.")
@@ -269,6 +274,49 @@ final class LiveClient: ObservableObject {
             messages.removeFirst(count)
             assistantIndex = assistantIndex.map { $0 - count }
         }
+    }
+
+    private func handleSearchCall(_ event: [String: Any]) {
+        guard state == .connected, event["name"] as? String == "web_search",
+              let callID = event["callId"] as? String, !callID.isEmpty, callID.count <= 200,
+              !handledSearchCalls.contains(callID) else { return }
+        handledSearchCalls.insert(callID)
+        guard handledSearchCalls.count <= 64, searchTasks.count < 3,
+              let arguments = event["arguments"] as? String, arguments.utf8.count <= 8000,
+              let object = try? JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any],
+              let query = object["query"] as? String,
+              !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            sendSearchOutput(callID: callID, result: ["error": "Search is unavailable for this request. Ask for a concise search query."])
+            return
+        }
+        let generation = sessionGeneration
+        let key = activeKey
+        searchTasks[callID] = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.sessionGeneration == generation { self.searchTasks[callID] = nil } }
+            do {
+                let result = try await self.api.searchWeb(key: key, query: query)
+                guard !Task.isCancelled, self.sessionGeneration == generation else { return }
+                self.hasSearched = true
+                for source in result.sources where !self.responseSources.contains(source) && self.responseSources.count < 12 {
+                    self.responseSources.append(source)
+                }
+                if let index = self.assistantIndex, self.messages.indices.contains(index) {
+                    self.messages[index].sources = self.responseSources
+                }
+                self.sendSearchOutput(callID: callID, result: ["text": result.text,
+                    "sources": result.sources.map { ["url": $0.url.absoluteString, "title": $0.title] }])
+            } catch {
+                guard !Task.isCancelled, self.sessionGeneration == generation else { return }
+                self.sendSearchOutput(callID: callID, result: ["error": "Web search is unavailable. Tell the user you could not verify current information."])
+            }
+        }
+    }
+
+    private func sendSearchOutput(callID: String, result: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: result) else { return }
+        send(["type": "conversation-item-create", "item": ["type": "function-call-output",
+            "callId": callID, "name": "web_search", "output": String(decoding: data, as: UTF8.self)]])
     }
 
     private func captureGrounding(_ event: [String: Any]) {

@@ -40,8 +40,9 @@ struct CharacterStage: NSViewRepresentable {
         view.defaultCameraController.maximumVerticalAngle = 40
         view.setAccessibilityLabel(controller.package?.manifest.name ?? "Pet companion")
         view.setAccessibilityHelp(isDesktopPet
-            ? "Tap, stroke, swipe, or hold on your pet. Option-drag to move them around your desktop."
+            ? "Drag your pet to move them around your desktop. Tap or hold to interact, Shift-drag to pet, or use a two-finger swipe to play."
             : "Move the pointer to catch their eye. Tap, stroke, swipe, or hold on your pet. Drag the background or Option-drag to orbit.")
+        if isDesktopPet { view.toolTip = "Drag to move your pet. Shift-drag to pet them." }
         return view
     }
     func updateNSView(_ view: PetSceneView, context: Context) {
@@ -53,7 +54,7 @@ struct CharacterStage: NSViewRepresentable {
     }
 }
 
-/// Pet contacts consume their events; background gestures keep SceneKit's camera controls.
+/// Desktop drags move the pet; editor background gestures keep SceneKit's camera controls.
 @MainActor
 final class PetSceneView: SCNView {
     let controller: CatSceneController
@@ -61,6 +62,8 @@ final class PetSceneView: SCNView {
     var hasActiveContact: Bool { contact != nil }
     private var pointerTracking: NSTrackingArea?
     private var contact: PetContact?
+    private var desktopDragOrigin: CGPoint?
+    private var isDraggingDesktopPet = false
     private var lastContactInteraction: PetReaction?
     private var holdTimer: Timer?
     private var windowObserver: NSObjectProtocol?
@@ -151,6 +154,9 @@ final class PetSceneView: SCNView {
         }
         cameraWasEnabled = allowsCameraControl
         allowsCameraControl = false
+        if isDesktopPet, !event.modifierFlags.contains(.shift), let panel = window as? DesktopPetPanel {
+            desktopDragOrigin = panel.convertPoint(toScreen: event.locationInWindow)
+        }
         contact = PetContact(point: point, time: event.timestamp)
         lastContactInteraction = nil
         controller.beginContact()
@@ -166,6 +172,25 @@ final class PetSceneView: SCNView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if let origin = desktopDragOrigin, let panel = window as? DesktopPetPanel {
+            // Use screen coordinates: local coordinates change as the panel follows the pointer.
+            let pointer = panel.convertPoint(toScreen: event.locationInWindow)
+            if !isDraggingDesktopPet, hypot(pointer.x - origin.x, pointer.y - origin.y) > PetContact.movementSlop {
+                finishContact()
+                controller.clearInteraction()
+                controller.followCursor(nil)
+                isDraggingDesktopPet = true
+                panel.beginDragging(at: origin)
+            }
+            if isDraggingDesktopPet {
+                panel.continueDragging(to: pointer)
+            } else {
+                // Small movement still belongs to a click or hold, without submitting a stroke.
+                _ = contact?.move(to: convert(event.locationInWindow, from: nil), at: event.timestamp)
+                followPointer(event)
+            }
+            return
+        }
         guard contact != nil else { super.mouseDragged(with: event); return }
         followPointer(event)
         if let reaction = contact?.move(to: convert(event.locationInWindow, from: nil), at: event.timestamp) {
@@ -174,6 +199,15 @@ final class PetSceneView: SCNView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isDraggingDesktopPet {
+            if let panel = window as? DesktopPetPanel {
+                panel.continueDragging(to: panel.convertPoint(toScreen: event.locationInWindow))
+            }
+            finishDesktopDrag()
+            followPointer(event)
+            return
+        }
+        finishDesktopDrag()
         guard contact != nil else { super.mouseUp(with: event); return }
         let point = convert(event.locationInWindow, from: nil)
         let reaction = contact?.end(at: point, time: event.timestamp)
@@ -229,8 +263,16 @@ final class PetSceneView: SCNView {
         allowsCameraControl = cameraWasEnabled
     }
 
+    private func finishDesktopDrag() {
+        desktopDragOrigin = nil
+        guard isDraggingDesktopPet else { return }
+        isDraggingDesktopPet = false
+        (window as? DesktopPetPanel)?.finishDragging()
+    }
+
     func cancelInteraction() {
         if contact != nil { finishContact() }
+        finishDesktopDrag()
         scrollContact = false; scrollTravel = .zero; scrollRecognized = false
         controller.clearInteraction()
     }

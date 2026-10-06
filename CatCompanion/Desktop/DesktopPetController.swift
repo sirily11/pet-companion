@@ -145,12 +145,31 @@ final class DesktopPetVoiceState: ObservableObject {
 
 final class DesktopPetPanel: NSPanel {
     private(set) var isDraggingPet = false
+    private var dragAnchor: (pointer: CGPoint, origin: CGPoint)?
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     func drag(with event: NSEvent) {
-        isDraggingPet = true
+        beginDragging(at: convertPoint(toScreen: event.locationInWindow))
         performDrag(with: event)
+        finishDragging()
+    }
+
+    func beginDragging(at pointer: CGPoint) {
+        dragAnchor = (pointer, frame.origin)
+        isDraggingPet = true
+        ignoresMouseEvents = false
+    }
+
+    func continueDragging(to pointer: CGPoint) {
+        guard let anchor = dragAnchor else { return }
+        setFrameOrigin(CGPoint(x: anchor.origin.x + pointer.x - anchor.pointer.x,
+                               y: anchor.origin.y + pointer.y - anchor.pointer.y))
+    }
+
+    func finishDragging() {
+        guard isDraggingPet else { return }
+        dragAnchor = nil
         isDraggingPet = false
         delegate?.windowDidMove?(Notification(name: NSWindow.didMoveNotification, object: self))
     }

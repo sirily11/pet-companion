@@ -3,9 +3,14 @@ import Combine
 import Security
 
 protocol GatewayKeyStore {
+    func containsKey() throws -> Bool
     func load() throws -> String?
     func save(_ key: String) throws
     func delete() throws
+}
+
+extension GatewayKeyStore {
+    func containsKey() throws -> Bool { !(try load() ?? "").isEmpty }
 }
 
 struct KeychainGatewayKeyStore: GatewayKeyStore {
@@ -14,6 +19,15 @@ struct KeychainGatewayKeyStore: GatewayKeyStore {
     private var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service, kSecAttrAccount as String: account]
+    }
+    func containsKey() throws -> Bool {
+        // Checking saved status must not read the secret or prompt at launch.
+        var request = query
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        let status = SecItemCopyMatching(request as CFDictionary, nil)
+        if status == errSecItemNotFound { return false }
+        guard status == errSecSuccess else { throw KeychainError(status: status) }
+        return true
     }
     func load() throws -> String? {
         var request = query
@@ -56,7 +70,7 @@ final class GatewaySettings: ObservableObject {
 
     init(store: GatewayKeyStore = KeychainGatewayKeyStore()) {
         self.store = store
-        do { hasKey = !(try store.load() ?? "").isEmpty }
+        do { hasKey = try store.containsKey() }
         catch { self.error = error.localizedDescription }
     }
 

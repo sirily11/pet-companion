@@ -211,7 +211,7 @@ final class DesktopPetDragView: NSView {
             label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             label.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
-        toolTip = "Drag to move your pet. You can also Option-drag the pet."
+        toolTip = "Drag the name bar or your pet to move them around your desktop."
         setAccessibilityLabel("Move \(name) around your desktop")
     }
     required init?(coder: NSCoder) { fatalError("Use init(name:)") }
