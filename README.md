@@ -1,6 +1,6 @@
 # PetPaw
 
-A standalone macOS 14+ pet companion app with separately imported characters, built with SwiftUI, SceneKit, and AVAudioEngine. Both AI features run directly from the app using the user's Vercel AI Gateway key. No server or Node runtime is required. Sparkle provides signed automatic app updates.
+A standalone macOS 14+ pet companion app with separately imported characters, built with SwiftUI, SceneKit, and AVAudioEngine. Voice, interaction reactions, and conversation poses use the user's Vercel AI Gateway key. Autonomous desktop pet moods and speech use Apple's on-device Foundation Models on supported Macs. No server or Node runtime is required. Sparkle provides signed automatic app updates.
 
 The app builds as `pet-companion.app`. Its native Icon Composer document is `CatCompanion/Resources/AppIcon.icon`, referenced directly by the app target. Xcode compiles the document into the system icon and generates icons for earlier macOS versions. The imagegen foreground and its generation prompt are saved in `Design/AppIcon/`.
 
@@ -21,21 +21,37 @@ After importing the Orange Kitten package, all twelve poses, joint sliders, the 
 
 The app ships without pet models, pose presets, or personality data. Click **Import pet companion** in the toolbar or empty stage, or press **⌘I**, then choose `companions/orange-kitten.zip` or the `companions/orange-kitten/` folder. All three original models, all 12 poses and their movement definitions, and the pet’s personality and voice are in this separate package.
 
-Imported runtime files are copied into Application Support and restored on launch. You can move the source ZIP afterward. Importing a new companion ends the previous conversation; an invalid package preserves your existing companion. Rebuild the ZIP with `./scripts/package-companion.sh` after changing the folder. See [the package format](companions/README.md) for editing and model compatibility.
+Imported runtime files are copied into Application Support, and all saved pets remain available across launches. You can move the source ZIP afterward. Each import adds a pet to your library and selects it, ending the previous conversation; an invalid package preserves your existing companion. Rebuild the ZIP with `./scripts/package-companion.sh` after changing the folder. See [the package format](companions/README.md) for editing and model compatibility.
+
+Use **Pets** in the toolbar or menu bar to switch between saved companions. **Manage Pets…** (**⇧⌘P**) opens your collection in a sheet, where you can select a pet, import another, or remove a saved pet. Removal always asks for confirmation and leaves the original source ZIP or folder untouched. Switching ends the current conversation and updates any visible desktop pet. Removing the active pet selects another available companion; removing the last available pet returns to the welcome screen and hides the desktop pet. The selected companion is restored on the next launch.
 
 ## Interact with your pet
 
 Move the pointer around the stage to make the pet follow it with their head and eyes. Click or use trackpad tap-to-click directly on the pet:
 
-- **Quick tap:** a happy greeting, little hop, and raised paw.
-- **Touch:** a gentle head dip and soft squish while pressed.
-- **Slow stroke:** a relaxed petting reaction.
-- **Swipe:** a playful pose and movement in the swipe direction. A two-finger trackpad swipe over the pet also works.
-- **Long press:** hold still for 0.55 seconds to cuddle; the reaction continues until you release.
+- **Quick tap:** click or tap to get the pet's attention.
+- **Touch:** press gently; contact feedback stays immediate.
+- **Slow stroke:** move slowly across the pet to pet them.
+- **Swipe:** swipe across the pet, or use a two-finger trackpad swipe over them.
+- **Long press:** hold still for 0.55 seconds to offer a cuddle.
 
-Reactions are temporary and use available poses from the imported package, with the current pose as a fallback. The selected pose and joint sliders remain intact, and voice lip sync continues during interactions. Leaving the stage lets the gaze settle; switching away from the window cancels active contacts. VoiceOver actions provide tap, pet, cuddle, and play alternatives.
+In both the editor and desktop pet mode, Jev chooses the reaction's pose and animation using the imported pet's full personality and the latest **10 interactions**, including the current one, in chronological order. Gestures from both views and completed user/pet conversation turns share this history. The same tap can get a different response as the pet's recent experience changes. This works without starting voice chat or granting microphone access, using the Gateway key saved in Settings.
+
+Requests debounce for 120 ms: a burst records each gesture but asks for a reaction to the latest one after input settles. A continuous stroke counts once, rather than once per movement sample. Touch feedback and cursor tracking stay immediate while the model responds. Jev can choose to stay still; low-confidence decisions use the package's default pose without added movement. A missing key or failed request displays a message with access to Settings. History stays in memory across voice connections and desktop show/hide, and resets when switching/importing a pet or restarting the app.
+
+Reactions are temporary and use available poses from the imported package. The selected pose and joint sliders remain intact, and voice lip sync continues during interactions. A model-selected cuddle can continue while held. Leaving the stage lets the gaze settle; switching away from the window cancels active contacts and pending reactions. Selecting a manual pose, hiding the desktop pet, or replacing a pet discards its pending reaction. VoiceOver actions use the same model path for tap, pet, cuddle, and play.
 
 Drag the empty background to orbit, or hold **Option** while dragging over the pet. Scroll the background to zoom; Option-scroll keeps zoom available over the pet.
+
+## Desktop pet
+
+After importing a companion, click **Show on desktop** in the editor toolbar (**⇧⌘D**). Your pet appears in a separate transparent floating window, stays visible while you use other apps, and follows you across desktop Spaces. The editor keeps its own camera, pose, and joint controls. The desktop pet also stays active when you close the editor; quit PetPaw to end it.
+
+Drag the pet's name bar or **Option-drag** the pet to move them. Tap, stroke, swipe, and cuddle work here too. Empty transparent space lets clicks pass through to the app underneath. Click **sparkles** to ask Jev for a new mood using the same personality and interaction history, or **×** / **Hide desktop pet** to put them away. Importing or switching to another pet updates the visible desktop companion while keeping your saved collection.
+
+Click **Talk** in the pet's bottom toolbar to start Gemini Live using the Gateway key saved in Settings, then speak into your microphone. The toolbar shows a soundwave responding to your voice and the pet's spoken reply, with mute/unmute and stop controls. Replies appear in the bubble above the pet, and the desktop pet follows the voice's lip sync and automatic poses. Random chatter pauses during the conversation and resumes afterward. The voice session continues if you close the editor while the desktop pet is visible; hiding the pet ends it. If a key is missing, the editor opens Settings for you.
+
+Every 25–45 seconds, Apple Foundation Models chooses a fresh emotion from the imported pet's poses and writes a matching short speech bubble using its personality. Bubbles stay above the pet for 16 seconds, with the pet toolbar below, and active petting/cuddles finish before a new mood takes over. Generation runs on this Mac, needs no Gateway key or microphone, and starts a fresh session each time. AI moods require **macOS 26+**, an Apple Intelligence-capable Mac, and Apple Intelligence enabled with its model downloaded. Earlier systems and unavailable/failed models use random imported poses and local lines. The app rechecks the model on the next moment.
 
 ## AI Settings
 
@@ -43,13 +59,13 @@ Drag the empty background to orbit, or hold **Option** while dragging over the p
 2. Paste your Vercel AI Gateway key and click **Save key**.
 3. Click **Start conversation** and grant microphone access.
 
-The app stores the key as a generic password in macOS Keychain. Settings displays a masked input and saved status; it never reveals the existing key. You can replace or remove it. Saving/removing a key ends any current conversation. Keys are not stored in source files, user defaults, or logs.
+The app stores the key as a generic password in macOS Keychain. Settings displays a masked input and saved status; it never reveals the existing key. You can replace or remove it. Saving/removing a key ends any current conversation and cancels pending reactions. Keys are not stored in source files, user defaults, or logs.
 
-Your Gateway account needs credits and access to both models. Conversation audio and transcript-based pose decisions go directly to AI Gateway. No app-owned backend is involved.
+Your Gateway account needs credits and access to both models. Conversation audio, the pet's personality, and recent interaction context for reaction/pose decisions go directly to AI Gateway. No app-owned backend is involved.
 
 - **Voice:** `google/gemini-3.8-live`. The app exchanges the saved key for a short-lived credential with `POST /v1/realtime/client-secrets`, then connects to Gateway's normalized realtime WebSocket using its documented subprotocols.
 - **Web search:** Google Search grounding is enabled in the Gemini Live session using native provider tools. The cat is instructed to search for current information and explicit lookup requests. Grounded replies display clickable source links in the conversation panel. Search uses the existing Gateway connection and key.
-- **Poses:** `typesafe-ai/jev`. The app calls `POST /v1/evaluate` with a typed choice question over the imported companion's poses. The Orange Kitten package contains twelve: Idle, Happy, Curious, Wave, Sleepy, Surprised, Playful, Cuddle, Shy, Stretch, Thinking, and Excited. Completed user and assistant transcripts trigger pose selection. Low-confidence choices return to the companion's default pose. Disable **Automatic poses** to prevent pose requests and retain manual control.
+- **Reactions and poses:** `typesafe-ai/jev`. The app calls `POST /v1/evaluate` with typed choices over imported poses and supported reaction animations (still, touch, bounce, nuzzle, cuddle, play). Each request includes the full personality and up to 10 recent interactions. The Orange Kitten package contains twelve poses: Idle, Happy, Curious, Wave, Sleepy, Surprised, Playful, Cuddle, Shy, Stretch, Thinking, and Excited. Completed user and assistant transcripts also trigger pose selection with the shared history. Low-confidence choices return to the companion's default pose. Disable **Conversation poses** to prevent conversation-driven pose requests; gestures still receive Jev reactions.
 - **Audio:** mono little-endian PCM16, microphone at 16 kHz and voice output at 24 kHz. AVAudioConverter resamples microphone input. Gemini's default automatic voice activity detection ends turns. The microphone pauses throughout each spoken reply, including gaps between streamed chunks, and resumes after the response ends, playback drains, and a short echo-decay delay passes. Manual mute remains in effect. The session omits the normalized `turnDetection` override because Gateway currently rejects it for Gemini Live.
 - **Conversation:** streaming voice transcripts, text input, microphone mute/unmute, cancel/reconnect, and actionable authentication/credit/network errors.
 
@@ -104,6 +120,7 @@ This remains approximate audio-driven lip sync rather than phoneme recognition. 
 - `CatCompanion/Character/`: skeleton, skinning, presets, unified facial surface, 3D features and lips, camera, and lighting.
 - `CatCompanion/Audio/`: microphone capture, conversion, streamed playback, voice demo, and lip analysis.
 - `CatCompanion/Conversation/`: Keychain storage, direct Gateway HTTP/WebSocket clients, and typed Jev pose selection.
+- `CatCompanion/Desktop/`: transparent desktop panel, pointer passthrough, on-device mood generation, and speech bubbles.
 - `CatCompanionTests/`: native request, Settings, streaming, rig, rendering, and audio tests.
 - `companions/orange-kitten/`: the importable kitten package, pose definitions, original supplied assets, and modeling source.
 

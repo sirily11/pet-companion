@@ -6,11 +6,11 @@ struct CatCompanionApp: App {
     @StateObject private var updates = UpdateService()
     @State private var showingUpdateSettings = false
     var body: some Scene {
-        WindowGroup("PetPaw") {
+        WindowGroup("PetPaw", id: "editor") {
             ContentView(coordinator: coordinator)
                 .frame(minWidth: 940, minHeight: 660)
-                .onDisappear { coordinator.disconnect() }
-                .onAppear { updates.start() }
+                .onDisappear { coordinator.editorDidClose() }
+                .onAppear { coordinator.editorDidOpen(); updates.start() }
                 .sheet(isPresented: $showingUpdateSettings) {
                     SoftwareUpdateSettingsView(updates: updates)
                 }
@@ -39,11 +39,15 @@ struct CatCompanionApp: App {
                     Label("Import pet companion…", systemImage: "square.and.arrow.down")
                 }.keyboardShortcut("i", modifiers: .command).disabled(coordinator.isImporting)
             }
+            CommandMenu("Pets") {
+                CompanionMenuItems(coordinator: coordinator)
+            }
             CommandMenu("Character") {
                 ForEach(coordinator.character.poses) { pose in
                     Button(pose.title) { coordinator.character.setPose(pose) }
                 }
                 Divider()
+                DesktopPetButton(coordinator: coordinator, desktopPet: coordinator.desktopPet)
                 Button("Reset Camera") { coordinator.character.resetCamera() }
                 Button("Stop Voice") { coordinator.disconnect() }
             }

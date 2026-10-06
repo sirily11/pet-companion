@@ -1,7 +1,7 @@
 import Foundation
 import zlib
 
-/// Imports only runtime data. The active pointer changes after the model renders successfully.
+/// Keeps imported runtime packages in a library, with a separate active pointer.
 struct CompanionStore {
     static let maximumBytes = 512 * 1024 * 1024
     let directory: URL
@@ -12,11 +12,31 @@ struct CompanionStore {
     }
 
     func current() throws -> CompanionPackage? {
+        guard let name = try activeName() else { return nil }
+        return try CompanionPackage.load(from: directory.appendingPathComponent(name, isDirectory: true))
+    }
+
+    func installed() throws -> [CompanionPackage] {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+        let roots = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: .skipsHiddenFiles)
+        return roots.compactMap { root -> CompanionPackage? in
+            guard UUID(uuidString: root.lastPathComponent) != nil,
+                  let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true, values.isSymbolicLink != true else { return nil }
+            return try? CompanionPackage.load(from: directory.appendingPathComponent(root.lastPathComponent, isDirectory: true))
+        }.sorted {
+            let order = $0.manifest.name.localizedStandardCompare($1.manifest.name)
+            return order == .orderedSame ? $0.root.lastPathComponent < $1.root.lastPathComponent : order == .orderedAscending
+        }
+    }
+
+    private func activeName() throws -> String? {
         let pointer = directory.appendingPathComponent("active.json")
         guard FileManager.default.fileExists(atPath: pointer.path) else { return nil }
         let name = try JSONDecoder().decode(String.self, from: Data(contentsOf: pointer))
         guard UUID(uuidString: name) != nil else { throw CompanionImportError.unsafePath }
-        return try CompanionPackage.load(from: directory.appendingPathComponent(name, isDirectory: true))
+        return name
     }
 
     func prepare(_ selectedURL: URL) throws -> CompanionPackage {
@@ -61,13 +81,42 @@ struct CompanionStore {
     }
 
     func activate(_ package: CompanionPackage) throws {
-        let name = package.root.lastPathComponent
-        guard UUID(uuidString: name) != nil, package.root.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL else {
+        try validateManagedPackage(package)
+        try JSONEncoder().encode(package.root.lastPathComponent)
+            .write(to: directory.appendingPathComponent("active.json"), options: .atomic)
+    }
+
+    func remove(_ package: CompanionPackage, replacingWith replacement: CompanionPackage? = nil) throws {
+        try validateManagedPackage(package)
+        if let replacement {
+            try validateManagedPackage(replacement)
+            guard replacement.root != package.root else { throw CompanionImportError.unsafePath }
+        }
+        let removingActive = try activeName() == package.root.lastPathComponent
+        let fm = FileManager.default
+        let retired = directory.appendingPathComponent(".removed-" + UUID().uuidString, isDirectory: true)
+        // Moving first makes removal reversible if updating the active pointer fails.
+        try fm.moveItem(at: package.root, to: retired)
+        do {
+            if removingActive {
+                if let replacement { try activate(replacement) }
+                else { try fm.removeItem(at: directory.appendingPathComponent("active.json")) }
+            }
+        } catch {
+            try fm.moveItem(at: retired, to: package.root)
+            throw error
+        }
+        // Retired packages are no longer part of the saved library.
+        try? fm.removeItem(at: retired)
+    }
+
+    private func validateManagedPackage(_ package: CompanionPackage) throws {
+        guard UUID(uuidString: package.root.lastPathComponent) != nil,
+              package.root.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL else {
             throw CompanionImportError.unsafePath
         }
-        let previous = try? current()?.root
-        try JSONEncoder().encode(name).write(to: directory.appendingPathComponent("active.json"), options: .atomic)
-        if let previous, previous != package.root { try? FileManager.default.removeItem(at: previous) }
+        let values = try package.root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values.isDirectory == true, values.isSymbolicLink != true else { throw CompanionImportError.unsafePath }
     }
 
     func discard(_ package: CompanionPackage) {

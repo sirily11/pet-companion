@@ -5,12 +5,21 @@ import simd
 
 @MainActor
 final class CatSceneController: ObservableObject {
+    enum Stage { case editor, desktop }
+    static let reactionDebounce: Float = 0.12
     let scene = SCNScene()
     let camera = SCNNode()
     let avatar = SCNNode()
     let skeleton = SCNNode()
     @Published private(set) var pose: CatPose?
     @Published private(set) var reaction: PetReaction?
+    @Published private(set) var reactionPose: CatPose?
+    @Published private(set) var isChoosingReaction = false
+    @Published private(set) var interactionError: String?
+    private(set) var interactionRevision = UUID()
+    var onInteraction: ((PetReaction) -> Void)?
+    var onInteractionCancelled: (() -> Void)?
+    var hasActiveInteraction: Bool { isTouching || isChoosingReaction || reaction != nil || reactionPose != nil || pendingReaction != nil }
     let package: CompanionPackage?
     var poses: [CatPose] { package?.poses ?? [] }
     @Published var showSkeleton = false { didSet { skeletonDisplay.isHidden = !showSkeleton } }
@@ -37,20 +46,21 @@ final class CatSceneController: ObservableObject {
     private var reactionRemaining: Float = 0
     private var reactionElapsed: Float = 0
     private var reactionStrength: Float = 0
-    private var reactionPose: CatPose?
+    private var pendingReaction: PetReaction?
+    private var pendingReactionRemaining: Float = 0
     private(set) var mouthRig: CatMouthRig?
     private(set) var faceRig: CatFaceRig?
 
-    init(package: CompanionPackage? = nil, animate: Bool = true) {
+    init(package: CompanionPackage? = nil, animate: Bool = true, stage: Stage = .editor) {
         self.package = package
         pose = package?.defaultPose
         currentExpression = package?.defaultPose.expression ?? "bright"
-        scene.background.contents = NSColor(calibratedRed: 0.97, green: 0.94, blue: 0.88, alpha: 1)
+        scene.background.contents = stage == .desktop ? NSColor.clear : NSColor(calibratedRed: 0.97, green: 0.94, blue: 0.88, alpha: 1)
         scene.rootNode.addChildNode(avatar)
         avatar.name = "CatAvatar"
         avatar.addChildNode(skeleton)
         skeleton.name = "CatSkeleton"
-        configureStage()
+        configureStage(stage)
         if let package {
             do { try loadCat(url: package.modelURL) } catch { loadError = error.localizedDescription }
         }
@@ -62,7 +72,7 @@ final class CatSceneController: ObservableObject {
 
     deinit { timer?.invalidate() }
 
-    private func configureStage() {
+    private func configureStage(_ stage: Stage) {
         camera.camera = SCNCamera()
         camera.camera?.fieldOfView = 36
         camera.camera?.projectionDirection = .vertical
@@ -70,6 +80,10 @@ final class CatSceneController: ObservableObject {
         camera.camera?.zFar = 10
         camera.position = SCNVector3(0.02, 0.145, 0.72)
         camera.look(at: SCNVector3(-0.01, 0.135, 0))
+        if stage == .desktop {
+            camera.camera?.usesOrthographicProjection = true
+            camera.camera?.orthographicScale = 0.15
+        }
         scene.rootNode.addChildNode(camera)
         let ambient = SCNNode()
         ambient.light = SCNLight()
@@ -83,6 +97,7 @@ final class CatSceneController: ObservableObject {
         key.eulerAngles = SCNVector3(-0.5, -0.5, 0)
         key.position = SCNVector3(-0.25, 0.50, 0.40)
         scene.rootNode.addChildNode(key)
+        guard stage == .editor else { return }
         let floor = SCNNode(geometry: SCNCylinder(radius: 0.19, height: 0.005))
         floor.position = SCNVector3(-0.015, -0.004, 0)
         floor.geometry?.firstMaterial?.diffuse.contents = NSColor(calibratedRed: 0.89, green: 0.83, blue: 0.73, alpha: 1)
@@ -204,7 +219,9 @@ final class CatSceneController: ObservableObject {
 
     func setPose(_ value: CatPose) {
         guard poses.contains(value) else { return }
+        cancelReactionRequest()
         clearReaction()
+        isTouching = false
         if value != pose { tailMoodElapsed = 0 }
         pose = value
         headPitch = 0; headYaw = 0; headTilt = 0; pawLift = 0; tailSwing = 0; mouthPreview = 0
@@ -219,13 +236,69 @@ final class CatSceneController: ObservableObject {
 
     func setTouching(_ touching: Bool) { isTouching = touching }
 
+    func beginContact() {
+        cancelReactionRequest()
+        setTouching(true)
+        // Immediate contact feedback carries no emotional pose; Jev decides the reaction.
+        react(.touch)
+    }
+
+    func interact(_ value: PetReaction) {
+        guard pose != nil, loadError == nil else { return }
+        if case .swipe(let direction) = value {
+            guard direction.x.isFinite, direction.y.isFinite, simd_length(direction) > 0 else { return }
+        }
+        interactionRevision = UUID()
+        onInteraction?(value)
+    }
+
+    func setReactionRequest(thinking: Bool, error: String?) {
+        if isChoosingReaction != thinking { isChoosingReaction = thinking }
+        if interactionError != error { interactionError = error }
+    }
+
+    func applyModelReaction(pose: CatPose, animation: PetReaction?) {
+        guard poses.contains(pose), loadError == nil else { return }
+        clearReaction()
+        tailMoodElapsed = 0
+        reactionElapsed = 0
+        reactionPose = pose
+        reaction = animation
+        reactionRemaining = animation?.duration ?? 2.2
+    }
+
+    private func cancelReactionRequest() {
+        interactionRevision = UUID()
+        onInteractionCancelled?()
+        setReactionRequest(thinking: false, error: nil)
+    }
+
     func react(_ value: PetReaction) {
         guard pose != nil, loadError == nil else { return }
         if case .swipe(let direction) = value {
             guard direction.x.isFinite, direction.y.isFinite, simd_length(direction) > 0 else { return }
         }
+        // Contact feedback stays immediate, without interrupting an animation on every click.
+        if value == .touch {
+            pendingReaction = nil
+            if reaction == nil || reaction == .touch { applyReaction(value) }
+            return
+        }
+        // A continuous stroke needs feedback before it stops moving. Repeated samples
+        // of the same stroke neither postpone its start nor restart its animation.
+        if value.sustainsWhileHeld, reaction == value {
+            pendingReaction = nil
+            reactionRemaining = value.duration
+            return
+        }
+        if value == .petting, pendingReaction == value { return }
+        pendingReaction = value
+        pendingReactionRemaining = Self.reactionDebounce
+    }
+
+    private func applyReaction(_ value: PetReaction) {
+        reactionElapsed = 0
         if reaction != value {
-            reactionElapsed = 0
             tailMoodElapsed = 0
             reaction = value
             reactionPose = value.poseIDs.compactMap { id in poses.first { $0.id == id } }.first
@@ -235,12 +308,22 @@ final class CatSceneController: ObservableObject {
     }
 
     private func clearReaction() {
+        pendingReaction = nil
+        pendingReactionRemaining = 0
+        endReaction()
+    }
+
+    private func endReaction() {
         if reaction != nil { tailMoodElapsed = 0 }
-        reaction = nil; reactionPose = nil; reactionRemaining = 0; isTouching = false
+        if reaction != nil { reaction = nil }
+        if reactionPose != nil { reactionPose = nil }
+        reactionRemaining = 0
     }
 
     func clearInteraction() {
+        cancelReactionRequest()
         clearReaction()
+        isTouching = false
         cursorTarget = .zero
     }
 
@@ -253,10 +336,17 @@ final class CatSceneController: ObservableObject {
         guard let selectedPose = pose, loadError == nil else { return }
         time += 1 / 60
         tailMoodElapsed += 1 / 60
-        if let reaction {
+        if let pendingReaction {
+            pendingReactionRemaining -= 1 / 60
+            if pendingReactionRemaining <= 0 {
+                self.pendingReaction = nil
+                applyReaction(pendingReaction)
+            }
+        }
+        if reaction != nil || reactionPose != nil {
             reactionElapsed += 1 / 60
-            if !(isTouching && reaction.sustainsWhileHeld) { reactionRemaining -= 1 / 60 }
-            if reactionRemaining <= 0 { clearReaction() }
+            if !(isTouching && reaction?.sustainsWhileHeld == true) { reactionRemaining -= 1 / 60 }
+            if reactionRemaining <= 0 { endReaction() }
         }
         let pose = reactionPose ?? selectedPose
         cursorGaze += (cursorTarget - cursorGaze) * 0.10

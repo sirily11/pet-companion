@@ -27,7 +27,7 @@ struct GatewaySettingsView: View {
             }
             VStack(alignment: .leading, spacing: 9) {
                 Label("Gemini 3.8 Live · Voice", systemImage: "waveform")
-                Label("Jev · Automatic poses", systemImage: "pawprint")
+                Label("Jev · Pet reactions and poses", systemImage: "pawprint")
             }.font(.system(size: 12)).padding(16).frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
             if let error = settings.error { Text(error).font(.system(size: 12)).foregroundStyle(.red) }
@@ -48,6 +48,6 @@ struct GatewaySettingsView: View {
         .alert("Remove your AI Gateway key?", isPresented: $confirmRemoval) {
             Button("Cancel", role: .cancel) {}
             Button("Remove", role: .destructive) { if settings.remove() { onChange() } }
-        } message: { Text("Live conversations will need a new key. Poses and the voice demo will keep working.") }
+        } message: { Text("Pet reactions and live conversations will need a new key. Manual poses and the voice demo will keep working.") }
     }
 }

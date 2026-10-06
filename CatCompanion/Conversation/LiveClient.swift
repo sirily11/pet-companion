@@ -54,10 +54,11 @@ final class LiveClient: ObservableObject {
     var onAudio: ((Data) -> Void)?
     var canSendAudio: (() -> Bool)?
     var onResponseDone: (() -> Void)?
+    var onTranscript: ((String) -> Void)?
     var onInterruption: (() -> Void)?
     var onPose: ((String) -> Void)?
     var companion: CompanionPackage? {
-        didSet { disconnect(); messages = []; error = nil }
+        didSet { disconnect(); interactionHistory.reset(); messages = []; error = nil }
     }
     var onReady: (() -> Void)?
     var onDisconnect: (() -> Void)?
@@ -71,14 +72,16 @@ final class LiveClient: ObservableObject {
     private var assistantIndex: Int?
     private var timeout: Task<Void, Never>?
     private var activeKey = ""
-    private var history: [ConversationLine] = []
+    let interactionHistory: PetInteractionHistory
     private var outputTranscript = ""
     private var poseRevision = 0
     private var pendingAudioBytes = 0
     private var responseSources: [WebSource] = []
 
-    init(api: GatewayAPI = GatewayAPI(), socketFactory: ((URL, [String]) -> any GatewaySocketTransport)? = nil) {
+    init(api: GatewayAPI = GatewayAPI(), interactionHistory: PetInteractionHistory? = nil,
+         socketFactory: ((URL, [String]) -> any GatewaySocketTransport)? = nil) {
         self.api = api
+        self.interactionHistory = interactionHistory ?? PetInteractionHistory()
         self.socketFactory = socketFactory ?? { url, protocols in api.session.webSocketTask(with: url, protocols: protocols) }
     }
 
@@ -137,7 +140,7 @@ final class LiveClient: ObservableObject {
         state = .disconnected
         assistantIndex = nil
         poseSource = "Manual"; poseConfidence = nil
-        activeKey = ""; history = []; outputTranscript = ""
+        activeKey = ""; outputTranscript = ""
         responseSources = []; hasSearched = false
         pendingAudioBytes = 0; poseRevision += 1
         onDisconnect?()
@@ -238,11 +241,13 @@ final class LiveClient: ObservableObject {
             outputTranscript = String((outputTranscript + text).prefix(8000))
             if let index = assistantIndex, messages.indices.contains(index) { messages[index].text = outputTranscript }
             else { messages.append(.init(role: "assistant", text: outputTranscript, sources: responseSources)); assistantIndex = messages.count - 1 }
+            onTranscript?(outputTranscript)
         case "audio-transcript-done":
             if let text = event["transcript"] as? String, !text.isEmpty {
                 outputTranscript = String(text.prefix(8000))
                 if let index = assistantIndex, messages.indices.contains(index) { messages[index].text = outputTranscript }
                 else { messages.append(.init(role: "assistant", text: outputTranscript, sources: responseSources)); assistantIndex = messages.count - 1 }
+                onTranscript?(outputTranscript)
             }
         case "input-transcription-completed":
             if let text = event["transcript"] as? String, !text.isEmpty {
@@ -284,8 +289,7 @@ final class LiveClient: ObservableObject {
     }
 
     private func addHistory(role: String, text: String) {
-        history.append(.init(role: role, text: String(text.prefix(4000))))
-        if history.count > 6 { history.removeFirst() }
+        interactionHistory.append(.init(kind: "conversation", surface: "conversation", role: role, text: text))
         requestPose()
     }
 
@@ -299,16 +303,20 @@ final class LiveClient: ObservableObject {
             var handled = -1
             while !Task.isCancelled, self.sessionGeneration == generation, handled != self.poseRevision {
                 let revision = self.poseRevision
+                let interactionRevision = self.interactionHistory.revision
                 handled = revision
                 do {
-                    let result = try await self.api.choosePose(key: self.activeKey, history: self.history, companion: companion)
+                    let result = try await self.api.choosePose(key: self.activeKey, interactions: self.interactionHistory.events, companion: companion)
                     guard !Task.isCancelled, self.sessionGeneration == generation else { return }
-                    if self.automaticallyChoosePoses, revision == self.poseRevision {
+                    if self.automaticallyChoosePoses, revision == self.poseRevision,
+                       interactionRevision == self.interactionHistory.revision {
                         self.poseSource = "Jev"; self.poseConfidence = result.confidence; self.onPose?(result.pose)
                     }
                 } catch {
                     guard !Task.isCancelled, self.sessionGeneration == generation else { return }
-                    if revision == self.poseRevision { self.error = "Jev could not choose a pose. Manual poses still work." }
+                    if revision == self.poseRevision, interactionRevision == self.interactionHistory.revision {
+                        self.error = "Jev could not choose a pose. Manual poses still work."
+                    }
                 }
             }
             if self.sessionGeneration == generation { self.poseTask = nil }

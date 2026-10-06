@@ -1,10 +1,70 @@
+# macOS metadata
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode builds and local settings
 build/
 DerivedData/
 *.xcuserstate
 xcuserdata/
+*.xcarchive/
+*.xcresult/
+*.dSYM/
+
+# Local archives and packaged apps
 .development-archive/
-.secrets/
 output/
+*.zip
 *.dmg
+*.pkg
+*.app/
+
+# 3D models and modeling exports
+models/
+*.usd
+*.usda
+*.usdc
+*.usdz
+*.glb
+*.gltf
+*.obj
+*.mtl
+*.fbx
+*.stl
+*.ply
+*.dae
+*.abc
+*.scn
+*.blend
+*.blend[0-9]*
+
+# Dependencies, generated website files, and caches
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+.cache/
+coverage/
+*.tsbuildinfo
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local secrets and configuration
+.secrets/
+.env*
+!.env.example
+
+# Logs, temporary files, and editor backups
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~

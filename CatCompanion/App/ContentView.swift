@@ -20,6 +20,18 @@ struct ContentView: View {
         .preferredColorScheme(.light)
         .toolbar {
             ToolbarItem(placement: .automatic) {
+                Menu {
+                    CompanionMenuItems(coordinator: coordinator)
+                } label: {
+                    Label("Pets", systemImage: "pawprint")
+                }
+                .disabled(coordinator.isImporting)
+                .help("Switch or manage your saved pets")
+            }
+            ToolbarItem(placement: .automatic) {
+                DesktopPetButton(coordinator: coordinator, desktopPet: coordinator.desktopPet)
+            }
+            ToolbarItem(placement: .automatic) {
                 Button { coordinator.showingImport = true } label: { Label("Import pet companion", systemImage: "square.and.arrow.down") }
                     .disabled(coordinator.isImporting)
             }
@@ -27,15 +39,75 @@ struct ContentView: View {
                 Button { coordinator.showingSettings = true } label: { Label("Settings", systemImage: "gearshape") }
             }
         }
-        .sheet(isPresented: $coordinator.showingSettings) { GatewaySettingsView(settings: coordinator.settings, onChange: coordinator.disconnect) }
-        .sheet(isPresented: $coordinator.showingImport) { ImportCompanionView(coordinator: coordinator) }
+        .sheet(isPresented: $coordinator.showingSettings) { GatewaySettingsView(settings: coordinator.settings, onChange: coordinator.settingsDidChange) }
+        .sheet(isPresented: Binding(
+            get: { coordinator.showingImport && !coordinator.showingPets },
+            set: { coordinator.showingImport = $0 }
+        )) { ImportCompanionView(coordinator: coordinator) }
+        .sheet(isPresented: $coordinator.showingPets) { ManageCompanionsView(coordinator: coordinator) }
+        .alert("Couldn’t update pets", isPresented: Binding(
+            get: { coordinator.petManagementError != nil && !coordinator.showingPets },
+            set: { if !$0 { coordinator.petManagementError = nil } }
+        )) {
+            Button("OK", role: .cancel) { coordinator.petManagementError = nil }
+        } message: { Text(coordinator.petManagementError ?? "") }
         .overlay(alignment: .top) {
-            if let notice = coordinator.importNotice {
-                Label(notice, systemImage: "checkmark.circle.fill")
-                    .padding(12).background(.regularMaterial, in: Capsule()).padding(.top, 12)
-                    .accessibilityLabel(notice)
+            if let notice = coordinator.petNotice {
+                CompanionNoticeView(message: notice)
             }
         }
+    }
+}
+
+struct CompanionMenuItems: View {
+    @ObservedObject var coordinator: CompanionCoordinator
+
+    var body: some View {
+        Group {
+            ForEach(coordinator.companions, id: \.root) { package in
+                Button { coordinator.selectCompanion(package) } label: {
+                    Label(package.manifest.name,
+                          systemImage: coordinator.character.package?.root == package.root ? "checkmark" : "pawprint")
+                }
+                .disabled(coordinator.character.package?.root == package.root)
+            }
+            if !coordinator.companions.isEmpty { Divider() }
+            Button { coordinator.showingPets = true } label: {
+                Label("Manage Pets…", systemImage: "square.stack.3d.up")
+            }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+        }
+        .disabled(coordinator.isImporting)
+    }
+}
+
+struct CompanionNoticeView: View {
+    let message: String
+
+    var body: some View {
+        Label(message, systemImage: "checkmark.circle.fill")
+            .font(.callout)
+            .padding(12).background(.regularMaterial, in: Capsule()).padding(.top, 12)
+            .accessibilityLabel(message)
+            .allowsHitTesting(false)
+    }
+}
+
+struct DesktopPetButton: View {
+    @ObservedObject var coordinator: CompanionCoordinator
+    @ObservedObject var desktopPet: DesktopPetController
+    var body: some View {
+        Button { coordinator.toggleDesktopPet() } label: {
+            Label(desktopPet.isVisible ? "Hide desktop pet" : "Show on desktop", systemImage: "desktopcomputer")
+        }
+        .disabled(coordinator.character.package == nil || coordinator.isImporting)
+        .help(desktopPet.isVisible ? "Hide your desktop companion" : "Let your pet keep you company on the desktop")
+        .keyboardShortcut("d", modifiers: [.command, .shift])
+        .alert("Couldn’t show desktop pet", isPresented: Binding(
+            get: { desktopPet.error != nil },
+            set: { if !$0 { desktopPet.clearError() } }
+        )) { Button("OK", role: .cancel) { desktopPet.clearError() } }
+        message: { Text(desktopPet.error ?? "") }
     }
 }
 
@@ -69,10 +141,14 @@ private struct StudioPanel: View {
                     ZStack(alignment: .bottom) {
                         CharacterStage(controller: character)
                             .id(ObjectIdentifier(character))
-                            .accessibilityAction(named: "Tap your pet") { character.react(.tap) }
-                            .accessibilityAction(named: "Pet gently") { character.react(.petting) }
-                            .accessibilityAction(named: "Cuddle your pet") { character.react(.longPress) }
-                            .accessibilityAction(named: "Play with your pet") { character.react(.swipe(SIMD2(1, 0))) }
+                            .accessibilityAction(named: "Tap your pet") { character.interact(.tap) }
+                            .accessibilityAction(named: "Pet gently") { character.interact(.petting) }
+                            .accessibilityAction(named: "Cuddle your pet") { character.interact(.longPress) }
+                            .accessibilityAction(named: "Play with your pet") { character.interact(.swipe(SIMD2(1, 0))) }
+                            .overlay(alignment: .top) {
+                                PetReactionStatus(character: character) { coordinator.showingSettings = true }
+                                    .padding(12)
+                            }
                         if let error = character.loadError {
                             ContentUnavailableView("Couldn’t load the companion", systemImage: "exclamationmark.triangle", description: Text(error))
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -80,7 +156,7 @@ private struct StudioPanel: View {
                         if let pose = character.pose {
                             HStack(spacing: 8) {
                                 Circle().fill(audio.isSpeaking ? accent : Color.green.opacity(0.7)).frame(width: 6, height: 6)
-                                Text(audio.isSpeaking ? "Speaking" : character.reaction?.title ?? pose.title).font(.system(size: 12, weight: .medium))
+                                Text(audio.isSpeaking ? "Speaking" : character.reactionPose?.title ?? character.reaction?.title ?? pose.title).font(.system(size: 12, weight: .medium))
                                 Text("· Tap, stroke or hold").font(.system(size: 12)).foregroundStyle(.secondary)
                             }
                             .padding(.horizontal, 16).padding(.vertical, 9)
@@ -98,6 +174,7 @@ private struct StudioPanel: View {
                     Spacer()
                     Button { showControls.toggle() } label: { Label("Joint controls", systemImage: "slider.horizontal.3") }
                         .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(accent)
+                        .hidden()
                 }
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 6), spacing: 8) {
                     ForEach(character.poses) { pose in
@@ -323,7 +400,7 @@ private struct ConversationPanel: View {
             }
             VStack(spacing: 12) {
                 HStack {
-                    Toggle("Automatic poses", isOn: $coordinator.automaticPoses).font(.system(size: 11)).toggleStyle(.checkbox)
+                    Toggle("Conversation poses", isOn: $coordinator.automaticPoses).font(.system(size: 11)).toggleStyle(.checkbox)
                     Spacer()
                     Text(live.poseSource).font(.system(size: 10)).foregroundStyle(.secondary)
                 }
@@ -336,8 +413,7 @@ private struct ConversationPanel: View {
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(ink.opacity(0.10)))
                 HStack(spacing: 8) {
                     Button {
-                        if live.state == .disconnected { Task { await coordinator.connect() } }
-                        else { coordinator.disconnect() }
+                        coordinator.toggleConversation()
                     } label: {
                         Label(live.state == .connected ? "End conversation" : live.state == .connecting ? "Cancel connection" : "Start conversation",
                               systemImage: live.state == .disconnected ? "mic.fill" : "stop.fill")

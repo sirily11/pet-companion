@@ -12,6 +12,8 @@ struct ImportCompanionView: View {
                 .font(.title2.weight(.medium))
             Text("Choose a companion ZIP or folder containing its personality, poses, and 3D models.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("Your pet will be added to your saved pets and selected. Switch between them from the Pets menu.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let package = coordinator.character.package {
                 Label("Current companion: \(package.manifest.name)", systemImage: "pawprint")
                     .font(.callout)
@@ -39,7 +41,11 @@ struct ImportCompanionView: View {
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.zip, .folder], allowsMultipleSelection: false) { result in
             switch result {
             case .success(let urls):
-                if let url = urls.first { Task { await coordinator.importCompanion(from: url) } }
+                if let url = urls.first {
+                    Task {
+                        if await coordinator.importCompanion(from: url) { dismiss() }
+                    }
+                }
             case .failure(let error): coordinator.importError = error.localizedDescription
             }
         }

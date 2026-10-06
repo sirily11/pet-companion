@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SceneKit
 import XCTest
 @testable import CatCompanion
@@ -130,6 +131,8 @@ final class PetInteractionTests: XCTestCase {
 
     @MainActor func testStageHitsPetAndRoutesTapWithoutOrbiting() throws {
         let character = CatSceneController(package: try TestCompanion.package(), animate: false)
+        var interactions: [PetReaction] = []
+        character.onInteraction = { interactions.append($0) }
         let view = PetSceneView(controller: character)
         view.frame = CGRect(x: 0, y: 0, width: 600, height: 600)
         view.scene = character.scene
@@ -148,7 +151,9 @@ final class PetInteractionTests: XCTestCase {
         XCTAssertEqual(character.reaction, .touch)
         XCTAssertFalse(view.allowsCameraControl)
         view.mouseUp(with: try mouse(.leftMouseUp, point: point, time: time + 0.1, window: window))
-        XCTAssertEqual(character.reaction, .tap)
+        for _ in 0..<10 { character.updateFrame() }
+        XCTAssertEqual(interactions, [.tap])
+        XCTAssertEqual(character.reaction, .touch, "Only neutral contact feedback precedes the model decision")
         XCTAssertTrue(view.allowsCameraControl)
         view.cancelInteraction()
         XCTAssertNil(character.reaction)
@@ -156,6 +161,140 @@ final class PetInteractionTests: XCTestCase {
         XCTAssertNil(character.reaction)
         XCTAssertTrue(view.allowsCameraControl)
         view.mouseUp(with: try mouse(.leftMouseUp, point: point, time: time + 1.1, window: window, modifiers: .option))
+    }
+
+    @MainActor func testStageLongPressTimerFiresBeforeReleaseAndFocusLossCancelsContact() async throws {
+        let character = CatSceneController(package: try TestCompanion.package())
+        let (view, window, point) = makeStage(character)
+        defer { view.cancelInteraction(); window.contentView = nil }
+        let held = expectation(description: "Cuddle begins while the mouse is still down")
+        var interactions: [PetReaction] = []
+        character.onInteraction = { interactions.append($0); held.fulfill() }
+        view.mouseDown(with: try mouse(.leftMouseDown, point: point, time: ProcessInfo.processInfo.systemUptime, window: window))
+        await fulfillment(of: [held], timeout: 2)
+        XCTAssertEqual(interactions, [.longPress])
+        XCTAssertFalse(view.allowsCameraControl)
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertNil(character.reaction)
+        XCTAssertTrue(view.allowsCameraControl)
+    }
+
+    @MainActor func testTrackpadSwipeConsumesPetScrollAndIgnoresMomentum() throws {
+        let character = CatSceneController(package: try TestCompanion.package(), animate: false)
+        var interactions: [PetReaction] = []
+        character.onInteraction = { interactions.append($0) }
+        let (view, window, point) = makeStage(character)
+        defer { view.cancelInteraction(); window.contentView = nil }
+        view.scrollWheel(with: try trackpad(point: point, x: 10, phase: 1))
+        XCTAssertNil(character.reaction, "Small trackpad jitter should not be a swipe")
+        view.scrollWheel(with: try trackpad(point: point, x: 20, phase: 2))
+        for _ in 0..<10 { character.updateFrame() }
+        guard case .swipe(let direction) = interactions.last else { return XCTFail("The trackpad should trigger a swipe") }
+        XCTAssertEqual(direction.x, 1, accuracy: 0.001)
+        XCTAssertEqual(direction.y, 0, accuracy: 0.001)
+        character.clearInteraction()
+        interactions = []
+        view.scrollWheel(with: try trackpad(point: point, x: 50, phase: 0, momentum: 1))
+        XCTAssertNil(character.reaction, "Inertial scrolling must not retrigger the pet")
+        XCTAssertTrue(interactions.isEmpty)
+        view.scrollWheel(with: try trackpad(point: CGPoint(x: 10, y: 10), x: 40, phase: 1))
+        XCTAssertNil(character.reaction, "Background scrolling belongs to the camera")
+        XCTAssertTrue(interactions.isEmpty)
+    }
+
+    @MainActor func testStrokeSendsOneInteractionForMovementSamplesAndReleaseInBothModes() throws {
+        for desktop in [false, true] {
+            let character = CatSceneController(package: try TestCompanion.package(), animate: false)
+            var interactions: [PetReaction] = []
+            character.onInteraction = { interactions.append($0) }
+            let (view, window, point) = makeStage(character, isDesktopPet: desktop)
+            defer { view.cancelInteraction(); window.contentView = nil }
+            let time = ProcessInfo.processInfo.systemUptime
+            view.mouseDown(with: try mouse(.leftMouseDown, point: point, time: time, window: window))
+            for step in 1...20 {
+                view.mouseDragged(with: try mouse(.leftMouseDragged,
+                    point: CGPoint(x: point.x + CGFloat(step), y: point.y), time: time + Double(step) * 0.08, window: window))
+            }
+            view.mouseUp(with: try mouse(.leftMouseUp, point: CGPoint(x: point.x + 20, y: point.y), time: time + 1.8, window: window))
+            XCTAssertEqual(interactions, [.petting])
+        }
+    }
+
+    @MainActor private func makeStage(_ character: CatSceneController, isDesktopPet: Bool = false) -> (PetSceneView, NSWindow, CGPoint) {
+        let view = PetSceneView(controller: character, isDesktopPet: isDesktopPet)
+        view.frame = CGRect(x: 0, y: 0, width: 600, height: 600)
+        view.scene = character.scene; view.pointOfView = character.camera; view.allowsCameraControl = true
+        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        _ = view.snapshot()
+        let center = view.projectPoint(SCNVector3(0, 0.15, 0.08))
+        return (view, window, CGPoint(x: CGFloat(center.x), y: CGFloat(center.y)))
+    }
+
+    private func trackpad(point: CGPoint, x: Int32, phase: Int64, momentum: Int64 = 0) throws -> NSEvent {
+        // Construct the native event without posting input to the computer.
+        let event = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
+            wheel1: 0, wheel2: x, wheel3: 0))
+        event.location = CGPoint(x: point.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - point.y)
+        event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+        event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum)
+        let native = try XCTUnwrap(NSEvent(cgEvent: event))
+        XCTAssertEqual(native.locationInWindow.x, point.x, accuracy: 0.1)
+        XCTAssertEqual(native.locationInWindow.y, point.y, accuracy: 0.1)
+        XCTAssertTrue(native.hasPreciseScrollingDeltas)
+        return native
+    }
+
+    @MainActor func testRapidReactionsWaitForQuietAndOnlyApplyTheLatestGesture() throws {
+        let character = CatSceneController(package: try TestCompanion.package(), animate: false)
+        var applied: [PetReaction] = []
+        let observer = character.$reaction.compactMap { $0 }.sink { applied.append($0) }
+        defer { observer.cancel() }
+        for _ in 0..<4 {
+            character.react(.tap)
+            for _ in 0..<4 { character.updateFrame() }
+            XCTAssertNil(character.reaction)
+        }
+        character.react(.swipe(SIMD2(-1, 0)))
+        for _ in 0..<4 { character.updateFrame() }
+        XCTAssertNil(character.reaction)
+        for _ in 0..<6 { character.updateFrame() }
+        XCTAssertEqual(applied, [.swipe(SIMD2(-1, 0))])
+    }
+
+    @MainActor func testContinuousPettingCoalescesWithoutStarvingAndCancellationDropsPendingReaction() throws {
+        let character = CatSceneController(package: try TestCompanion.package(), animate: false)
+        var applied: [PetReaction] = []
+        let observer = character.$reaction.compactMap { $0 }.sink { applied.append($0) }
+        defer { observer.cancel() }
+        character.setTouching(true)
+        for _ in 0..<120 { character.react(.petting); character.updateFrame() }
+        XCTAssertEqual(applied, [.petting])
+        XCTAssertEqual(character.reaction, .petting)
+        character.clearInteraction()
+        character.react(.tap)
+        character.clearInteraction()
+        for _ in 0..<20 { character.updateFrame() }
+        XCTAssertNil(character.reaction)
+        XCTAssertEqual(applied, [.petting])
+        character.react(.swipe(SIMD2(1, 0)))
+        character.setPose(try TestCompanion.pose("sleepy"))
+        for _ in 0..<20 { character.updateFrame() }
+        XCTAssertNil(character.reaction)
+    }
+
+    @MainActor func testNewContactCancelsPendingTapWithoutInterruptingActiveAnimation() throws {
+        let character = CatSceneController(package: try TestCompanion.package(), animate: false)
+        character.react(.tap)
+        character.react(.touch)
+        for _ in 0..<10 { character.updateFrame() }
+        XCTAssertEqual(character.reaction, .touch)
+        character.react(.tap)
+        for _ in 0..<10 { character.updateFrame() }
+        XCTAssertEqual(character.reaction, .tap)
+        character.react(.touch)
+        XCTAssertEqual(character.reaction, .tap, "Rapid presses must not alternate the active animation between touch and tap")
     }
 
     @MainActor private func mouse(_ type: NSEvent.EventType, point: CGPoint, time: TimeInterval,

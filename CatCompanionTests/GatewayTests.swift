@@ -140,6 +140,74 @@ final class GatewayTests: XCTestCase {
         }
     }
 
+    func testJevReactionSendsFullPersonalityAndLastTenMixedInteractions() async throws {
+        let package = try TestCompanion.package()
+        var interactions = (0..<12).map {
+            PetInteractionEvent(kind: "conversation", surface: "conversation", role: "user", text: "Turn \($0)")
+        }
+        interactions.append(.init(gesture: .tap, surface: "editor"))
+        interactions.append(.init(gesture: .swipe(SIMD2(-1, 0)), surface: "desktop"))
+        GatewayURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/evaluate")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key")
+            let body = try self.body(of: request)
+            XCTAssertEqual(body["model"] as? String, GatewayAPI.poseModel)
+            let state = try XCTUnwrap(body["state"] as? [String: Any])
+            let personality = try XCTUnwrap(state["personality"] as? [String: String])
+            XCTAssertEqual(personality["description"], package.personality.description)
+            XCTAssertEqual(personality["instructions"], package.personality.instructions)
+            XCTAssertEqual(personality["voice"], package.personality.voice)
+            let recent = try XCTUnwrap(state["interactions"] as? [[String: Any]])
+            XCTAssertEqual(recent.count, 10)
+            XCTAssertEqual(recent.first?["text"] as? String, "Turn 4")
+            XCTAssertEqual(recent[8]["surface"] as? String, "editor")
+            XCTAssertEqual(recent.last?["kind"] as? String, "swipe")
+            XCTAssertEqual(recent.last?["surface"] as? String, "desktop")
+            XCTAssertEqual(recent.last?["direction"] as? [Float], [-1, 0])
+            let questions = try XCTUnwrap(body["questions"] as? [String: [String: Any]])
+            XCTAssertEqual(questions["animation"]?["type"] as? String, "choice")
+            XCTAssertEqual(Set((questions["animation"]?["criteria"] as? [String: String] ?? [:]).keys),
+                Set(PetReactionAnimation.allCases.map(\.rawValue)))
+            return (200, Data(#"{"answers":{"pose":{"type":"choice","choice":"sleepy","probabilities":{"sleepy":0.97}},"animation":{"type":"choice","choice":"still","probabilities":{"still":0.96}}}}"#.utf8))
+        }
+        let decision = try await api().chooseReaction(key: "test-key", interactions: interactions, companion: package)
+        XCTAssertEqual(decision.pose, "sleepy")
+        XCTAssertEqual(decision.animation, .still)
+    }
+
+    func testJevReactionRejectsUnknownAnimationAndUsesNeutralLowConfidenceFallback() async throws {
+        let package = try TestCompanion.package()
+        GatewayURLProtocol.handler = { _ in
+            (200, Data(#"{"answers":{"pose":{"type":"choice","choice":"happy","probabilities":{"happy":0.9}},"animation":{"type":"choice","choice":"invented","probabilities":{"invented":1}}}}"#.utf8))
+        }
+        do { _ = try await api().chooseReaction(key: "test-key", interactions: [], companion: package); XCTFail("Unsupported animation must fail") }
+        catch { XCTAssertTrue(error is GatewayError) }
+        GatewayURLProtocol.handler = { _ in
+            (200, Data(#"{"answers":{"pose":{"type":"choice","choice":"happy","probabilities":{"happy":0.2}},"animation":{"type":"choice","choice":"bounce","probabilities":{"bounce":0.9}}}}"#.utf8))
+        }
+        let decision = try await api().chooseReaction(key: "test-key", interactions: [], companion: package)
+        XCTAssertEqual(decision.pose, package.manifest.defaultPose)
+        XCTAssertEqual(decision.animation, .still)
+    }
+
+    @MainActor func testCompletedConversationTurnsSharePetGestureHistoryAcrossDisconnect() async throws {
+        let memory = PetInteractionHistory()
+        let client = LiveClient(interactionHistory: memory)
+        client.companion = try TestCompanion.package()
+        client.automaticallyChoosePoses = false
+        memory.append(.init(gesture: .tap, surface: "desktop"))
+        client.handleEvent(["type": "input-transcription-completed", "transcript": "Hello kitten"])
+        client.handleEvent(["type": "audio-transcript-delta", "delta": "Hello friend"])
+        client.handleEvent(["type": "response-done"])
+        XCTAssertEqual(memory.events.map(\.kind), ["tap", "conversation", "conversation"])
+        XCTAssertEqual(memory.events.map(\.role), ["user", "user", "assistant"])
+        XCTAssertEqual(memory.events.last?.text, "Hello friend")
+        client.disconnect()
+        XCTAssertEqual(memory.events.count, 3, "Ending voice must preserve gesture context")
+        client.companion = try TestCompanion.package()
+        XCTAssertTrue(memory.events.isEmpty, "Replacing the companion resets its memory")
+    }
+
     @MainActor func testGroundingSourcesAttachToTheirReplyAndRejectUnsafeLinks() async throws {
         GatewayURLProtocol.handler = { _ in (200, Data(#"{"token":"vcst_test-secret"}"#.utf8)) }
         let socket = FakeGatewaySocket()
