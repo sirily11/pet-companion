@@ -1,0 +1,46 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: pet-companion-create-release
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create Release
+        id: release
+        uses: cycjimmy/semantic-release-action@v6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # Releases created by GITHUB_TOKEN do not trigger release-event workflows.
+      # workflow_dispatch does trigger them, using the same repository-scoped token.
+      - name: Start signed macOS deployment
+        if: steps.release.outputs.new_release_published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.new_release_git_tag }}
+        run: gh workflow run macos-release.yaml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$RELEASE_TAG"
