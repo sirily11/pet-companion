@@ -57,8 +57,11 @@ struct GatewayAPI {
             // Use its normalized function contract and return grounded results.
             "tools": [["type": "function", "name": "web_search",
                 "description": "Search Google for current information and return verified facts with source links.",
-                "parameters": ["type": "object", "properties": ["query": ["type": "string"]],
-                    "required": ["query"], "additionalProperties": false]]]
+                "parameters": ["type": "object", "properties": ["query": ["type": "string",
+                    "description": "A concise search query. Include the location and date when relevant."]],
+                    "required": ["query"], "additionalProperties": false]]],
+            // Wait for grounded results before continuing the spoken answer.
+            "providerOptions": ["google": ["defaultToolBehavior": "BLOCKING"]]
             // Gemini enables automatic voice detection by default. Gateway's
             // Gemini transform rejects the normalized turnDetection override.
         ]]
@@ -79,7 +82,7 @@ struct GatewayAPI {
         var sources: [WebSource] = []
         for part in response.content where part.type == "source" && part.sourceType == "url" {
             guard let url = part.url, let source = WebSource(urlString: url, title: part.title),
-                  !sources.contains(source), sources.count < 12 else { continue }
+                  !sources.contains(where: { $0.id == source.id }), sources.count < 12 else { continue }
             sources.append(source)
         }
         // An ungrounded model answer is not a verified search result.
