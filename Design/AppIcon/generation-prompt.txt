@@ -1,0 +1,10 @@
+Tool: built-in image_gen (transparent_background: true)
+Reference: companions/orange-kitten/source/reference-original.png
+
+Use case: stylized-concept
+Asset type: transparent foreground artwork for the macOS app icon of pet-companion, to be imported as a layer into Apple Icon Composer.
+Primary request: create a polished, instantly recognizable friendly orange-and-cream kitten emblem based on the reference kitten. Preserve its round head, orange tabby markings, cream muzzle/chest, pink inner ears, happy closed crescent eyes, tiny pink nose, and smiling mouth. Show a compact seated kitten with two little front paws and a curled tail tucked at its side.
+Input image: the existing orange kitten illustration is a character identity and palette reference, not a background to retain.
+Style/medium: refined softly sculpted 3D ceramic-toy illustration, warm matte surface, simplified broad forms and clean silhouette, gentle dimensional highlights. Warm, welcoming personality.
+Composition/framing: square 1024 x 1024 canvas, single large centered kitten, symmetrical front-facing head with subtly asymmetric curled tail. Keep all ears, tail and paws inside central 80 percent of canvas with generous equal transparent margin. Readable at small Dock sizes.
+Constraints: actual transparent alpha background; the kitten only; no background tile, no rounded square, no scenery, no props, no letters, no text, no watermark, no cast shadow outside the kitten silhouette. Icon Composer will add background, glass and shadow itself.

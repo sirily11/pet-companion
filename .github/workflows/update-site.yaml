@@ -1,0 +1,33 @@
+name: Initialize Update Site
+on:
+  workflow_dispatch:
+concurrency:
+  group: pet-companion-update-site
+  cancel-in-progress: false
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Protect an existing signed feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COUNT=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq '[.[] | select(.draft == false and .prerelease == false)] | length')
+          if [ "$COUNT" != 0 ]; then
+            echo 'A stable release exists. Publish its signed feed using macOS Release instead.' >&2
+            exit 1
+          fi
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: update-site
+      - uses: actions/deploy-pages@v5
+        id: deploy

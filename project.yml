@@ -1,0 +1,92 @@
+name: CatCompanion
+options:
+  bundleIdPrefix: com.rxlab
+  deploymentTarget:
+    macOS: '14.0'
+  createIntermediateGroups: true
+  postGenCommand: perl -pi -e 's/lastKnownFileType = wrapper\.icon;/lastKnownFileType = folder.iconcomposer.icon;/g' CatCompanion.xcodeproj/project.pbxproj
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    MACOSX_DEPLOYMENT_TARGET: '14.0'
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_APP_SANDBOX: YES
+    SWIFT_STRICT_CONCURRENCY: targeted
+    MARKETING_VERSION: '1.0.0'
+    CURRENT_PROJECT_VERSION: '1'
+  configs:
+    Release:
+      ENABLE_HARDENED_RUNTIME: YES
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
+targets:
+  CatCompanion:
+    type: application
+    platform: macOS
+    productName: pet-companion
+    sources:
+      - path: CatCompanion
+        excludes:
+          - Resources/AppIcon.icon
+      - path: CatCompanion/Resources/AppIcon.icon
+        type: file
+        buildPhase: resources
+    info:
+      path: CatCompanion/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: PetPaw
+        CFBundleName: PetPaw
+        LSApplicationCategoryType: public.app-category.entertainment
+        NSMicrophoneUsageDescription: Talk to your cat with Gemini Live.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        SUFeedURL: https://update.pet.rxlab.app/appcast.xml
+        SUPublicEDKey: 2K1OD7PusnQi1SKCHGv6AWhxkEQ3GXOpage8h0xK9yc=
+        SUEnableInstallerLauncherService: true
+        SUEnableAutomaticChecks: true
+        SUAllowsAutomaticUpdates: true
+        SUAutomaticallyUpdate: true
+        SUVerifyUpdateBeforeExtraction: true
+    entitlements:
+      path: CatCompanion/Resources/CatCompanion.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.device.audio-input: true
+        com.apple.security.files.user-selected.read-only: true
+        com.apple.security.temporary-exception.mach-lookup.global-name:
+          - $(PRODUCT_BUNDLE_IDENTIFIER)-spks
+          - $(PRODUCT_BUNDLE_IDENTIFIER)-spki
+    dependencies:
+      - package: Sparkle
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rxlab.CatCompanion
+        PRODUCT_NAME: pet-companion
+        PRODUCT_MODULE_NAME: CatCompanion
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks
+  CatCompanionTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: CatCompanionTests
+      - path: companions/orange-kitten
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: CatCompanion
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  CatCompanion:
+    build:
+      targets:
+        CatCompanion: all
+        CatCompanionTests: [test]
+    test:
+      targets: [CatCompanionTests]

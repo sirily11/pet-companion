@@ -1,0 +1,331 @@
+import XCTest
+@testable import CatCompanion
+
+final class GatewayURLProtocol: URLProtocol {
+    static var handler: ((URLRequest) throws -> (Int, Data))?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        do {
+            let (code, data) = try Self.handler!(request)
+            let response = HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+    override func stopLoading() {}
+}
+
+final class MemoryGatewayKeyStore: GatewayKeyStore {
+    var value: String?
+    var failWrites = false
+    func load() throws -> String? { value }
+    func save(_ key: String) throws {
+        if failWrites { throw KeychainError(status: -1) }
+        value = key
+    }
+    func delete() throws { value = nil }
+}
+
+@MainActor
+final class FakeGatewaySocket: GatewaySocketTransport {
+    var maximumMessageSize = 0
+    var response: URLResponse?
+    var closeCode: URLSessionWebSocketTask.CloseCode = .invalid
+    var closeReason: Data?
+    var receiveError: Error?
+    var sessionReadyEvent = "session-updated"
+    var sent: [[String: Any]] = []
+    private var pending: CheckedContinuation<URLSessionWebSocketTask.Message, Error>?
+    private var queue: [URLSessionWebSocketTask.Message] = []
+    private var cancelled = false
+    func resume() {}
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        cancelled = true
+        pending?.resume(throwing: URLError(.cancelled)); pending = nil
+    }
+    func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        guard !cancelled else { throw URLError(.cancelled) }
+        guard case .string(let text) = message,
+              let event = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return }
+        sent.append(event)
+        if event["type"] as? String == "session-update" {
+            // Reproduce the live Gateway failure when Gemini gets this override.
+            if let config = event["config"] as? [String: Any], config["turnDetection"] != nil {
+                closeCode = .policyViolation
+                closeReason = Data("WebSocket transform rejected frame".utf8)
+                throw NSError(domain: NSPOSIXErrorDomain, code: 57)
+            }
+            feed(["type": sessionReadyEvent])
+        }
+    }
+    func receive() async throws -> URLSessionWebSocketTask.Message {
+        if cancelled { throw URLError(.cancelled) }
+        if let receiveError { throw receiveError }
+        if !queue.isEmpty { return queue.removeFirst() }
+        return try await withCheckedThrowingContinuation { pending = $0 }
+    }
+    func feed(_ event: [String: Any]) {
+        let data = try! JSONSerialization.data(withJSONObject: event)
+        let message = URLSessionWebSocketTask.Message.data(data)
+        if let pending { self.pending = nil; pending.resume(returning: message) }
+        else { queue.append(message) }
+    }
+}
+
+final class GatewayTests: XCTestCase {
+    private func api() -> GatewayAPI {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GatewayURLProtocol.self]
+        return GatewayAPI(session: URLSession(configuration: configuration))
+    }
+    override func tearDown() { GatewayURLProtocol.handler = nil; super.tearDown() }
+
+    func testNativeTokenRequestAndWebSocketAuthContract() async throws {
+        GatewayURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.absoluteString, "https://ai-gateway.vercel.sh/v1/realtime/client-secrets")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key")
+            let body = try self.body(of: request)
+            XCTAssertEqual(body["model"] as? String, "google/gemini-3.8-live")
+            XCTAssertEqual(body["expiresIn"] as? Int, 60)
+            return (200, Data(#"{"token":"vcst_test-secret"}"#.utf8))
+        }
+        let token = try await api().createRealtimeToken(key: "test-key")
+        XCTAssertEqual(GatewayAPI.realtimeProtocols(token: token), ["ai-gateway-realtime.v1", "ai-gateway-auth.vcst_test-secret"])
+        XCTAssertEqual(GatewayAPI.realtimeURL().host, "ai-gateway.vercel.sh")
+    }
+
+    func testNativeJevUsesChoicesAndRejectsUnknownPose() async throws {
+        GatewayURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/evaluate")
+            let body = try self.body(of: request)
+            XCTAssertEqual(body["model"] as? String, "typesafe-ai/jev")
+            let questions = try XCTUnwrap(body["questions"] as? [String: Any])
+            let pose = try XCTUnwrap(questions["pose"] as? [String: Any])
+            XCTAssertEqual(pose["type"] as? String, "choice")
+            XCTAssertEqual(Set((pose["criteria"] as? [String: String] ?? [:]).keys), Set(try TestCompanion.package().poses.map(\.id)))
+            return (200, Data(#"{"answers":{"pose":{"type":"choice","choice":"wave","probabilities":{"wave":0.96}}}}"#.utf8))
+        }
+        let decision = try await api().choosePose(key: "test-key", history: [.init(role: "user", text: "Wave hello")], companion: try TestCompanion.package())
+        XCTAssertEqual(decision.pose, "wave")
+        XCTAssertEqual(decision.confidence, 0.96)
+        GatewayURLProtocol.handler = { _ in (200, Data(#"{"answers":{"pose":{"type":"choice","choice":"run","probabilities":{"run":1}}}}"#.utf8)) }
+        do { _ = try await api().choosePose(key: "test-key", history: [], companion: try TestCompanion.package()); XCTFail("Unknown motion must be rejected") }
+        catch { XCTAssertTrue(error is GatewayError) }
+    }
+
+    func testLowConfidencePoseAndAuthenticationErrors() async throws {
+        GatewayURLProtocol.handler = { _ in (200, Data(#"{"answers":{"pose":{"type":"choice","choice":"surprised","probabilities":{"surprised":0.2}}}}"#.utf8)) }
+        let decision = try await api().choosePose(key: "test-key", history: [], companion: try TestCompanion.package())
+        XCTAssertEqual(decision.pose, "idle")
+        GatewayURLProtocol.handler = { _ in (401, Data("secret-provider-details".utf8)) }
+        do { _ = try await api().createRealtimeToken(key: "test-key"); XCTFail("Unauthorized should fail") }
+        catch {
+            XCTAssertTrue(error.localizedDescription.contains("Settings"))
+            XCTAssertFalse(error.localizedDescription.contains("secret-provider-details"))
+        }
+    }
+
+    func testNewPosesAreAcceptedByJev() async throws {
+        for pose in ["playful", "cuddle", "shy", "stretch", "thinking", "excited"] {
+            GatewayURLProtocol.handler = { _ in
+                let body: [String: Any] = ["answers": ["pose": ["type": "choice", "choice": pose,
+                    "probabilities": [pose: 0.98]]]]
+                return (200, try JSONSerialization.data(withJSONObject: body))
+            }
+            let decision = try await api().choosePose(key: "test-key", history: [], companion: try TestCompanion.package())
+            XCTAssertEqual(decision.pose, pose)
+        }
+    }
+
+    @MainActor func testGroundingSourcesAttachToTheirReplyAndRejectUnsafeLinks() async throws {
+        GatewayURLProtocol.handler = { _ in (200, Data(#"{"token":"vcst_test-secret"}"#.utf8)) }
+        let socket = FakeGatewaySocket()
+        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        client.companion = try TestCompanion.package()
+        client.automaticallyChoosePoses = false
+        let ready = expectation(description: "Search session ready")
+        client.onReady = { ready.fulfill() }
+        if client.companion == nil { client.companion = try TestCompanion.package() }
+        await client.connect(key: "test-key")
+        await fulfillment(of: [ready], timeout: 2)
+        let metadata: [String: Any] = ["webSearchQueries": ["Hong Kong weather today"], "groundingChunks": [
+            ["web": ["uri": "https://www.hko.gov.hk/en/index.html", "title": "Hong Kong Observatory"]],
+            ["web": ["uri": "javascript:alert(1)", "title": "Unsafe"]],
+            ["web": ["uri": "file:///etc/passwd", "title": "Local file"]]
+        ]]
+        let raw: [String: Any] = ["serverContent": ["groundingMetadata": metadata]]
+        client.handleEvent(["type": "custom", "rawType": "serverContent", "raw": raw])
+        client.handleEvent(["type": "audio-transcript-delta", "delta": "Today's weather."])
+        // The same raw grounding can occur on several normalized audio events.
+        client.handleEvent(["type": "audio-delta", "raw": raw])
+        XCTAssertTrue(client.hasSearched)
+        XCTAssertEqual(client.messages.last?.sources.count, 1)
+        XCTAssertEqual(client.messages.last?.sources.first?.title, "Hong Kong Observatory")
+        client.handleEvent(["type": "response-done", "raw": raw])
+        client.handleEvent(["type": "audio-transcript-delta", "delta": "You're welcome!"])
+        XCTAssertTrue(client.messages.last!.sources.isEmpty, "An unsearched reply must not inherit the previous sources")
+        // Grounding arriving after transcript text must update that same line.
+        client.handleEvent(["type": "custom", "rawType": "serverContent", "raw": raw])
+        XCTAssertEqual(client.messages.last?.sources.count, 1)
+        client.disconnect()
+        XCTAssertFalse(client.hasSearched)
+        XCTAssertEqual(client.messages.first?.sources.count, 1, "Disconnect retains visible citations")
+    }
+
+    @MainActor func testSettingsSaveReplaceRemoveAndFailedStorage() {
+        let store = MemoryGatewayKeyStore()
+        let settings = GatewaySettings(store: store)
+        XCTAssertFalse(settings.hasKey)
+        XCTAssertTrue(settings.save(" test-first-key\n"))
+        XCTAssertTrue(settings.hasKey)
+        XCTAssertEqual(try settings.key(), "test-first-key")
+        XCTAssertTrue(settings.save("test-replacement-key"))
+        XCTAssertEqual(try settings.key(), "test-replacement-key")
+        store.failWrites = true
+        XCTAssertFalse(settings.save("test-other-key"))
+        XCTAssertEqual(store.value, "test-replacement-key")
+        XCTAssertNotNil(settings.error)
+        XCTAssertTrue(settings.remove())
+        XCTAssertFalse(settings.hasKey)
+        XCTAssertThrowsError(try settings.key())
+        XCTAssertFalse(settings.save(""))
+    }
+
+    @MainActor func testDirectNativeLiveAudioTranscriptAndInterruption() async throws {
+        GatewayURLProtocol.handler = { _ in (200, Data(#"{"token":"vcst_test-secret"}"#.utf8)) }
+        let socket = FakeGatewaySocket()
+        socket.sessionReadyEvent = "session-created"
+        let client = LiveClient(api: api(), socketFactory: { url, protocols in
+            XCTAssertEqual(url.host, "ai-gateway.vercel.sh")
+            XCTAssertEqual(protocols.last, "ai-gateway-auth.vcst_test-secret")
+            return socket
+        })
+        client.companion = try TestCompanion.package()
+        client.automaticallyChoosePoses = false
+        let ready = expectation(description: "Native session ready")
+        client.onReady = { ready.fulfill() }
+        if client.companion == nil { client.companion = try TestCompanion.package() }
+        await client.connect(key: "test-key")
+        await fulfillment(of: [ready], timeout: 2)
+        XCTAssertEqual(client.state, .connected)
+        let config = try XCTUnwrap(socket.sent.first?["config"] as? [String: Any])
+        XCTAssertEqual((config["inputAudioFormat"] as? [String: Any])?["rate"] as? Int, 16000)
+        XCTAssertEqual((config["outputAudioFormat"] as? [String: Any])?["rate"] as? Int, 24000)
+        XCTAssertNil(config["turnDetection"], "Gemini must use its default VAD to avoid Gateway rejecting setup")
+        let provider = try XCTUnwrap(config["providerOptions"] as? [String: Any])
+        let tools = try XCTUnwrap(provider["tools"] as? [[String: Any]])
+        XCTAssertNotNil(tools.first?["googleSearch"] as? [String: Any], "Native search must be enabled in Gemini setup")
+        let audio = expectation(description: "Audio played")
+        client.onAudio = { bytes in XCTAssertEqual(bytes, Data([0, 0, 1, 0])); audio.fulfill() }
+        let interrupted = expectation(description: "Playback interrupted")
+        let responseFinished = expectation(description: "Response finished separately from playback")
+        client.onResponseDone = { responseFinished.fulfill() }
+        client.onInterruption = { interrupted.fulfill() }
+        socket.feed(["type": "audio-delta", "delta": "AAABAA=="])
+        socket.feed(["type": "input-transcription-completed", "transcript": "Hello"])
+        socket.feed(["type": "audio-transcript-delta", "delta": "Hello there"])
+        socket.feed(["type": "audio-transcript-done", "transcript": "Hello there!"])
+        socket.feed(["type": "response-done"])
+        socket.feed(["type": "speech-started"])
+        await fulfillment(of: [audio, interrupted, responseFinished], timeout: 2)
+        XCTAssertEqual(client.messages.map(\.text), ["Hello", "Hello there!"])
+        client.sendAudio(Data([0, 0, 1, 0]))
+        client.sendText("Wave")
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(socket.sent.contains { $0["type"] as? String == "input-audio-append" })
+        XCTAssertTrue(socket.sent.contains { $0["type"] as? String == "conversation-item-create" })
+        XCTAssertFalse(socket.sent.contains { $0["type"] as? String == "response-create" })
+        client.disconnect()
+        XCTAssertEqual(client.state, .disconnected)
+    }
+
+    @MainActor func testMicrophonePacketsAreDroppedWhileReplyPlaysAndResumeAfterward() async throws {
+        GatewayURLProtocol.handler = { _ in (200, Data(#"{"token":"vcst_test-secret"}"#.utf8)) }
+        let socket = FakeGatewaySocket()
+        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        client.companion = try TestCompanion.package()
+        client.automaticallyChoosePoses = false
+        let ready = expectation(description: "Connected for microphone gating")
+        client.onReady = { ready.fulfill() }
+        if client.companion == nil { client.companion = try TestCompanion.package() }
+        await client.connect(key: "test-key")
+        await fulfillment(of: [ready], timeout: 2)
+
+        var listening = true
+        client.canSendAudio = { listening }
+        let pcm = Data([0, 0, 1, 0])
+        client.sendAudio(pcm)
+        // A queued microphone packet must be checked again before transmission.
+        listening = false
+        client.sendAudio(pcm)
+        client.sendText("Hello")
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(socket.sent.contains { $0["type"] as? String == "input-audio-append" })
+        XCTAssertTrue(socket.sent.contains { $0["type"] as? String == "conversation-item-create" })
+
+        listening = true
+        client.sendAudio(pcm)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(socket.sent.filter { $0["type"] as? String == "input-audio-append" }.count, 1)
+        client.disconnect()
+    }
+
+    @MainActor func testWebSocketSetupRejectionIsNotReportedAsBadKeyOrCredits() async throws {
+        GatewayURLProtocol.handler = { _ in (200, Data(#"{"token":"vcst_test-secret"}"#.utf8)) }
+        let socket = FakeGatewaySocket()
+        socket.closeCode = .policyViolation
+        socket.closeReason = Data("WebSocket transform rejected frame".utf8)
+        socket.receiveError = NSError(domain: NSPOSIXErrorDomain, code: 57)
+        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        var started = false
+        let closed = expectation(description: "Rejected connection cleaned up")
+        client.onDisconnect = { if started { closed.fulfill() } }
+        client.onReady = { XCTFail("Rejected session must not start the microphone") }
+        if client.companion == nil { client.companion = try TestCompanion.package() }
+        await client.connect(key: "test-key")
+        started = true
+        await fulfillment(of: [closed], timeout: 2)
+        XCTAssertEqual(client.state, .disconnected)
+        let message = try XCTUnwrap(client.error)
+        XCTAssertTrue(message.contains("configuration"))
+        XCTAssertFalse(message.contains("credits"))
+        XCTAssertFalse(message.contains("test-secret"))
+    }
+
+    @MainActor func testWebSocketAuthenticationRejectionKeepsActionableErrorAndRedactsReason() async throws {
+        GatewayURLProtocol.handler = { _ in (200, Data(#"{"token":"vcst_test-secret"}"#.utf8)) }
+        let socket = FakeGatewaySocket()
+        socket.response = HTTPURLResponse(url: GatewayAPI.realtimeURL(), statusCode: 401, httpVersion: nil, headerFields: nil)
+        socket.closeReason = Data("sensitive-provider-details vcst_test-secret".utf8)
+        socket.receiveError = URLError(.badServerResponse)
+        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        var started = false
+        let closed = expectation(description: "Unauthorized connection cleaned up")
+        client.onDisconnect = { if started { closed.fulfill() } }
+        if client.companion == nil { client.companion = try TestCompanion.package() }
+        await client.connect(key: "test-key")
+        started = true
+        await fulfillment(of: [closed], timeout: 2)
+        let message = try XCTUnwrap(client.error)
+        XCTAssertTrue(message.contains("Settings"))
+        XCTAssertFalse(message.contains("sensitive-provider-details"))
+        XCTAssertFalse(message.contains("test-secret"))
+    }
+
+    private func body(of request: URLRequest) throws -> [String: Any] {
+        if let data = request.httpBody { return try JSONSerialization.jsonObject(with: data) as! [String: Any] }
+        let stream = try XCTUnwrap(request.httpBodyStream)
+        stream.open(); defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        return try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    }
+}

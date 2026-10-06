@@ -1,0 +1,91 @@
+name: macOS Release
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable release tag to rebuild
+        required: true
+        type: string
+concurrency:
+  group: pet-companion-update-site
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  build:
+    if: github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft)
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ github.event.release.tag_name || inputs.tag }}
+      BUILD_NUMBER: ${{ github.run_number }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      SIGNING_CERTIFICATE_NAME: ${{ secrets.SIGNING_CERTIFICATE_NAME }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - run: brew install xcodegen
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - run: python3 -m pip install cryptography
+      - run: python3 scripts/ci/test_validate_appcast.py
+      - uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.P12_PASSWORD }}
+      - name: Archive universal app
+        run: ./scripts/ci/build-archive.sh
+      - name: Sign Sparkle helpers
+        run: ./scripts/ci/sign-sparkle.sh
+      - name: Notarize and staple DMG
+        run: ./scripts/ci/notarize.sh
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PWD: ${{ secrets.APPLE_ID_PWD }}
+      - name: Generate verified update site
+        run: ./scripts/ci/generate-appcast.sh
+        env:
+          SPARKLE_KEY: ${{ secrets.SPARKLE_KEY }}
+          RELEASE_NOTE: ${{ github.event.release.body }}
+      - name: Upload signed DMG to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$VERSION" output/PetCompanion.dmg --clobber
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pet-companion-update-site
+          path: output/pages
+          include-hidden-files: true
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pet-companion-symbols
+          path: output/PetCompanion.xcarchive/dSYMs
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: pet-companion-update-site
+          path: pages
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: pages
+      - uses: actions/deploy-pages@v5
+        id: deploy

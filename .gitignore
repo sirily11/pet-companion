@@ -1,0 +1,10 @@
+.DS_Store
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.development-archive/
+.secrets/
+output/
+*.dmg
+__pycache__/
