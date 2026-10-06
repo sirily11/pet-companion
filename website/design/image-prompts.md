@@ -1,6 +1,6 @@
 # Website artwork
 
-Generated with the built-in imagegen tool on October 7, 2026. Both prompts use `companions/orange-kitten/previews/happy-front.png` as a character identity reference. The illustrations are promotional artwork, not screenshots of the running app.
+Generated with the built-in imagegen tool on October 7, 2026. The hero and cozy desktop prompts use `companions/orange-kitten/previews/happy-front.png` as a character identity reference. The social preview card uses the hero kitten as its reference. The illustrations are promotional artwork, not screenshots of the running app.
 
 ## Hero kitten
 
@@ -17,3 +17,9 @@ Use case: stylized-concept. Asset type: wide landscape lifestyle illustration fo
 ## App icon
 
 `public/icon.png` is a resized copy of the existing app asset at `Design/AppIcon/pet-companion-icon.png`.
+
+## Social preview card
+
+Final asset: `src/app/opengraph-image.jpg`. Opaque 1200×630 JPEG, resized and optimized from the generated card. Reference image: `public/images/kitten-hero.webp`.
+
+Use case: ads-marketing. Asset type: Open Graph social sharing card for the PetPaw macOS desktop companion website. Create a polished wide horizontal branded card with an exact 1200 by 630 pixel composition (aspect ratio 1.905:1). Input image 1 is a character identity and art style reference: preserve this orange tabby kitten’s rounded 3D clay-render look, orange stripes, cream muzzle and chest, rosy cheeks, amber eyes, curled tail and raised waving paw. Use a clean warm cream #fffcf7 background across the canvas. Left half: generous whitespace, a small paw outline logo beside the exact wordmark "PetPaw." at upper left, then a large modern rounded sans-serif dark brown #332a24 headline on three lines reading exactly "A little pet." / "A lot of" / "company." with the word company in warm terracotta #88452d. At lower left put only the smaller phrase "Your playful Mac companion". Right half: a soft apricot #f4d9bd rounded panel with this cute waving kitten large and fully visible, its ears, paws and curled tail within the panel. Very subtle thin circular orbit line behind the kitten and two tiny decorative stars, matched to the website’s existing warm friendly minimal design. Keep all text and character within a generous 55 pixel safe margin. Friendly premium editorial layout, crisp readable typography, matte tactile illustration, warm diffuse lighting. No laptop, no buttons, no UI controls, no additional copy, no domain name, no watermark. Opaque background.

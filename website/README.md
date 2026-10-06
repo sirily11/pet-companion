@@ -24,7 +24,13 @@ npm run build
 
 The production build is a static export in `out/`. Serve that folder with any static host. The development server supports local preview; `next start` does not serve static exports.
 
-For deployment, copy `.env.example` to `.env.local` and set `NEXT_PUBLIC_SITE_URL` to the final public URL before building. This enables absolute social preview image URLs without assuming a hosting domain.
+Social preview URLs default to `https://pet.rxlab.app`. To deploy on another host, copy `.env.example` to `.env.local` and set `NEXT_PUBLIC_SITE_URL` to that host's public URL before building.
+
+## Social previews
+
+The dedicated 1200×630 JPEG sharing card is `src/app/opengraph-image.jpg`, with accessible text in `src/app/opengraph-image.alt.txt`. Next.js's file-based metadata includes its image URL, type, dimensions, and alt text in the page head and exports the image with the static site. Twitter uses the same image with a `summary_large_image` card. The image is included even when `NEXT_PUBLIC_SITE_URL` is unset, using the default public URL.
+
+The card was generated with the built-in imagegen tool using the existing hero kitten as a reference. Its prompt is in `design/image-prompts.md`.
 
 ## Downloads
 
