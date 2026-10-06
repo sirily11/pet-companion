@@ -67,7 +67,12 @@ final class CatMouthRig {
     private func rebuildCavity(_ rim: [SIMD3<Float>]) {
         let center = rim.reduce(SIMD3<Float>.zero, +) / Float(rim.count)
         let vertices = [center] + rim
-        let indices = (0..<segments).flatMap { [Int32(0), Int32($0 + 1), Int32(($0 + 1) % segments + 1)] }
+        var indices: [Int32] = []
+        for index in 0..<segments {
+            indices.append(0)
+            indices.append(Int32(index + 1))
+            indices.append(Int32((index + 1) % segments + 1))
+        }
         let geometry = SCNGeometry(sources: [SCNGeometrySource(vertices: vertices.map(SCNVector3.init))],
                                    elements: [SCNGeometryElement(indices: indices, primitiveType: .triangles)])
         geometry.materials = [cavityMaterial]

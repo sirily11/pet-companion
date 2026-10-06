@@ -26,7 +26,14 @@ enum CatTailGeometry {
         let b = controlPoints[index]
         let c = controlPoints[index + 1]
         let d = controlPoints[min(controlPoints.count - 1, index + 2)]
-        return 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (-a + 3 * b - 3 * c + d) * t * t * t)
+        let linear: SIMD3<Float> = -a + c
+        let quadratic: SIMD3<Float> = (2 * a - 5 * b) + (4 * c - d)
+        let cubic: SIMD3<Float> = (-a + 3 * b) - (3 * c - d)
+        var point: SIMD3<Float> = 2 * b
+        point += linear * t
+        point += quadratic * t * t
+        point += cubic * t * t * t
+        return 0.5 * point
     }
 
     private static func tangent(at t: Float) -> SIMD3<Float> {
