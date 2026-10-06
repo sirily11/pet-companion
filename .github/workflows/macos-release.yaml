@@ -51,10 +51,12 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PWD: ${{ secrets.APPLE_ID_PWD }}
       - name: Generate verified update site
-        run: ./scripts/ci/generate-appcast.sh
+        run: |
+          export RELEASE_NOTE="$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
+          ./scripts/ci/generate-appcast.sh
         env:
+          GH_TOKEN: ${{ github.token }}
           SPARKLE_KEY: ${{ secrets.SPARKLE_KEY }}
-          RELEASE_NOTE: ${{ github.event.release.body }}
       - name: Upload signed DMG to release
         env:
           GH_TOKEN: ${{ github.token }}
