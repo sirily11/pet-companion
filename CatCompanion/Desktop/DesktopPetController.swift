@@ -125,7 +125,7 @@ final class DesktopPetController: NSObject, ObservableObject, NSWindowDelegate {
 
 @MainActor
 final class DesktopPetVoiceState: ObservableObject {
-    let live: LiveClient
+    let live: ConversationSession
     let audio: AudioController
     @Published var isRequestingMicrophone = false
     @Published var outputLevel: Float = 0
@@ -137,7 +137,7 @@ final class DesktopPetVoiceState: ObservableObject {
     var onToggleMicrophone: (() -> Void)?
     var onShowSettings: (() -> Void)?
 
-    init(live: LiveClient, audio: AudioController) {
+    init(live: ConversationSession, audio: AudioController) {
         self.live = live
         self.audio = audio
     }

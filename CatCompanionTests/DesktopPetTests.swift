@@ -7,7 +7,7 @@ import XCTest
 
 final class DesktopPetTests: XCTestCase {
     @MainActor func testDesktopPanelGivesSceneAUsableViewportWhenShownAndReplaced() async throws {
-        let controller = DesktopPetController(voice: DesktopPetVoiceState(live: LiveClient(), audio: AudioController()))
+        let controller = DesktopPetController(voice: DesktopPetVoiceState(live: ConversationSession(), audio: AudioController()))
         // Keep autonomous model requests out of this window-layout regression.
         controller.behavior.setConversationActive(true)
         defer { controller.hide() }

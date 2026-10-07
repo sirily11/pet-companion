@@ -23,7 +23,7 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.entertainment</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Talk to your cat with Gemini Live.</string>
+	<string>Talk to your pet with the selected voice model.</string>
 	<key>SUAllowsAutomaticUpdates</key>
 	<true/>
 	<key>SUAutomaticallyUpdate</key>

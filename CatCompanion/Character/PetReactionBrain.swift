@@ -1,6 +1,6 @@
 import Foundation
 
-struct PetInteractionEvent: Codable, Equatable {
+struct PetInteractionEvent: Codable, Equatable, Sendable {
     let kind: String
     let surface: String
     let role: String
@@ -42,7 +42,7 @@ final class PetInteractionHistory {
     func reset() { events = []; revision = UUID() }
 }
 
-enum PetReactionAnimation: String, CaseIterable {
+enum PetReactionAnimation: String, CaseIterable, Sendable {
     case still, touch, bounce, nuzzle, cuddle, play
 
     var criteria: String {
@@ -144,7 +144,7 @@ final class PetReactionBrain {
                 guard let self, let character, !Task.isCancelled, self.generation == token,
                       character.interactionRevision == revision else { return }
                 let message: String
-                if let gateway = error as? GatewayError { message = gateway.localizedDescription }
+                if let localized = error as? LocalizedError { message = localized.localizedDescription }
                 else { message = "Your pet couldn’t choose a reaction. Try interacting again." }
                 character.setReactionRequest(thinking: false, error: message)
                 self.task = nil

@@ -66,10 +66,22 @@ struct KeychainError: LocalizedError {
 final class GatewaySettings: ObservableObject {
     @Published private(set) var hasKey = false
     @Published var error: String?
+    @Published var provider: LiveChatProvider { didSet { defaults.set(provider.rawValue, forKey: "voiceProvider") } }
+    @Published var decisionBackend: DecisionBackend { didSet { defaults.set(decisionBackend.rawValue, forKey: "decisionBackend") } }
+    @Published private var modelSelections: [String: String] {
+        didSet { defaults.set(modelSelections, forKey: "voiceModels") }
+    }
+    private let defaults: UserDefaults
+    var selectedModel: String { model(for: provider) }
+    func model(for provider: LiveChatProvider) -> String { modelSelections[provider.rawValue] ?? provider.defaultModel }
+    func selectModel(_ model: String) { modelSelections[provider.rawValue] = model }
     private let store: GatewayKeyStore
 
-    init(store: GatewayKeyStore = KeychainGatewayKeyStore()) {
-        self.store = store
+    init(store: GatewayKeyStore = KeychainGatewayKeyStore(), defaults: UserDefaults = .standard) {
+        self.store = store; self.defaults = defaults
+        provider = LiveChatProvider(rawValue: defaults.string(forKey: "voiceProvider") ?? "") ?? .gemini
+        decisionBackend = DecisionBackend(rawValue: defaults.string(forKey: "decisionBackend") ?? "") ?? .cloud
+        modelSelections = defaults.dictionary(forKey: "voiceModels") as? [String: String] ?? [:]
         do { hasKey = try store.containsKey() }
         catch { self.error = error.localizedDescription }
     }
