@@ -49,21 +49,7 @@ struct WebSource: Identifiable, Hashable {
 }
 
 @MainActor
-protocol GatewaySocketTransport: AnyObject {
-    var maximumMessageSize: Int { get set }
-    var response: URLResponse? { get }
-    var closeCode: URLSessionWebSocketTask.CloseCode { get }
-    var closeReason: Data? { get }
-    func resume()
-    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
-    func send(_ message: URLSessionWebSocketTask.Message) async throws
-    func receive() async throws -> URLSessionWebSocketTask.Message
-}
-
-extension URLSessionWebSocketTask: GatewaySocketTransport {}
-
-@MainActor
-final class LiveClient: ObservableObject {
+final class ConversationSession: ObservableObject {
     enum State: String { case disconnected, connecting, connected }
     @Published private(set) var state: State = .disconnected
     @Published private(set) var messages: [ConversationLine] = []
@@ -90,10 +76,14 @@ final class LiveClient: ObservableObject {
     var onReady: (() -> Void)?
     var onDisconnect: (() -> Void)?
     private let api: GatewayAPI
-    private var socket: (any GatewaySocketTransport)?
-    private let socketFactory: (URL, [String]) -> any GatewaySocketTransport
-    private var receiveTask: Task<Void, Never>?
-    private var sendTask: Task<Void, Never>?
+    @Published var provider: LiveChatProvider = .gemini
+    @Published var model = LiveChatProvider.gemini.defaultModel
+    var audioFormat: LiveAudioFormat { .init(inputSampleRate: provider.inputSampleRate, outputSampleRate: 24_000) }
+    var choosePose: (([PetInteractionEvent], CompanionPackage) async throws -> PoseDecision)?
+    var decisionSource: (() -> String)?
+    private var client: (any LiveChatClient)?
+    private var profile: ConversationProfile?
+    private let clientFactory: (LiveChatProvider) -> any LiveChatClient
     private var poseTask: Task<Void, Never>?
     private var searchTasks: [String: Task<Void, Never>] = [:]
     private var toolCallExpiryTasks: [String: Task<Void, Never>] = [:]
@@ -106,14 +96,16 @@ final class LiveClient: ObservableObject {
     let interactionHistory: PetInteractionHistory
     private var outputTranscript = ""
     private var poseRevision = 0
-    private var pendingAudioBytes = 0
     private var responseSources: [WebSource] = []
 
     init(api: GatewayAPI = GatewayAPI(), interactionHistory: PetInteractionHistory? = nil,
          socketFactory: ((URL, [String]) -> any GatewaySocketTransport)? = nil) {
         self.api = api
         self.interactionHistory = interactionHistory ?? PetInteractionHistory()
-        self.socketFactory = socketFactory ?? { url, protocols in api.session.webSocketTask(with: url, protocols: protocols) }
+        self.clientFactory = { provider in
+            if provider == .gemini { return GeminiLiveClient(api: api, socketFactory: socketFactory) }
+            return GPTRealtimeClient(api: api, socketFactory: socketFactory)
+        }
     }
 
     func connect(key: String) async {
@@ -129,43 +121,26 @@ final class LiveClient: ObservableObject {
             guard let self, !Task.isCancelled, self.state == .connecting, self.sessionGeneration == token else { return }
             self.fail("The voice connection timed out. Check your key, model access, and network.")
         }
+        let adapter = clientFactory(provider)
+        client = adapter
+        adapter.canSendAudio = { [weak self] in self?.canSendAudio?() != false }
+        adapter.onEvent = { [weak self] event in
+            guard let self, self.sessionGeneration == token else { return }
+            self.handle(event)
+        }
+        let profile = ConversationProfile(companion: companion, api: api, key: key)
+        self.profile = profile
         do {
-            let secret = try await api.createRealtimeToken(key: key)
-            guard sessionGeneration == token, state == .connecting else { return }
-            let task = socketFactory(GatewayAPI.realtimeURL(), GatewayAPI.realtimeProtocols(token: secret))
-            task.maximumMessageSize = 512 * 1024
-            socket = task
-            task.resume()
-            send(GatewayAPI.sessionEvent(companion: companion), duringSetup: true)
-            receiveTask = Task { [weak self] in
-                do {
-                    while !Task.isCancelled {
-                        let message = try await task.receive()
-                        guard let self, self.sessionGeneration == token else { return }
-                        let data: Data
-                        switch message {
-                        case .data(let bytes): data = bytes
-                        case .string(let string): data = Data(string.utf8)
-                        @unknown default: continue
-                        }
-                        self.handle(data)
-                    }
-                } catch {
-                    guard let self, self.sessionGeneration == token, !Task.isCancelled else { return }
-                    self.fail(Self.connectionError(error, socket: task))
-                }
-            }
+            try await adapter.connect(configuration: .init(provider: provider, model: model, companion: companion, profile: profile), key: key)
         } catch {
             guard sessionGeneration == token else { return }
-            fail((error as? GatewayError)?.localizedDescription ?? Self.connectionError(error))
+            fail((error as? GatewayError)?.localizedDescription ?? "Could not connect to the voice model. Check your network and model access.")
         }
     }
 
     func disconnect() {
         sessionGeneration = UUID()
         timeout?.cancel(); timeout = nil
-        receiveTask?.cancel(); receiveTask = nil
-        sendTask?.cancel(); sendTask = nil
         poseTask?.cancel(); poseTask = nil
         for task in searchTasks.values { task.cancel() }
         for task in toolCallExpiryTasks.values { task.cancel() }
@@ -176,144 +151,84 @@ final class LiveClient: ObservableObject {
             messages[index].toolCall?.result = "The conversation ended before the tool finished."
         }
         searchTasks = [:]; handledSearchCalls = []; cancelledSearchCalls = []
-        socket?.cancel(with: .normalClosure, reason: nil); socket = nil
+        client?.disconnect(); client = nil
+        profile = nil
         state = .disconnected
         assistantIndex = nil
         poseSource = "Manual"; poseConfidence = nil
         activeKey = ""; outputTranscript = ""
         responseSources = []; hasSearched = false; isSearching = false
-        pendingAudioBytes = 0; poseRevision += 1
+        poseRevision += 1
         onDisconnect?()
     }
 
     private func fail(_ message: String) { disconnect(); error = message }
 
-    private static func connectionError(_ error: Error, socket: (any GatewaySocketTransport)? = nil) -> String {
-        if let status = (socket?.response as? HTTPURLResponse)?.statusCode, status != 101 {
-            return GatewayError.http(status).localizedDescription
-        }
-        // Match known reasons without exposing arbitrary provider payloads or credentials.
-        if let reason = socket?.closeReason,
-           String(data: reason, encoding: .utf8) == "WebSocket transform rejected frame" {
-            return "AI Gateway rejected the Gemini session configuration. Please reconnect; if it persists, the app's Gemini configuration needs updating."
-        }
-        if socket?.closeCode == .policyViolation {
-            return "AI Gateway rejected the Gemini Live session. Check model access and account limits, then reconnect."
-        }
-        if let network = error as? URLError {
-            switch network.code {
-            case .timedOut:
-                return "The Gemini Live connection timed out. Check your network or proxy, then reconnect."
-            case .notConnectedToInternet, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost:
-                return "Could not connect to Gemini Live. Check your network or proxy, then reconnect."
-            default: break
-            }
-        }
-        return "The Gemini Live connection closed unexpectedly. Check your network or proxy, then reconnect."
-    }
-
     func sendAudio(_ data: Data) {
         guard state == .connected, canSendAudio?() != false else { return }
-        guard pendingAudioBytes + data.count < 16_000 * 2 * 3 else {
-            fail("The connection cannot keep up with the microphone. Please reconnect."); return
-        }
-        send(["type": "input-audio-append", "audio": data.base64EncodedString()], audioBytes: data.count)
+        client?.sendAudio(data)
     }
-    func clearInput() { send(["type": "input-audio-clear"]) }
+    func clearInput() { client?.clearInput() }
     func sendText(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard state == .connected, !trimmed.isEmpty else { return }
         let limited = String(trimmed.prefix(4000))
         messages.append(.init(role: "user", text: limited))
         addHistory(role: "user", text: limited)
-        send(["type": "conversation-item-create", "item": ["type": "text-message", "role": "user", "text": limited]])
-        // Gemini responds to conversation-item-create; no duplicate response-create.
+        client?.sendText(limited)
     }
 
-    private func send(_ value: [String: Any], duringSetup: Bool = false, audioBytes: Int = 0,
-                      searchCallID: String? = nil) {
-        guard (state == .connected || duringSetup), let socket,
-              let data = try? JSONSerialization.data(withJSONObject: value),
-              let string = String(data: data, encoding: .utf8) else { return }
-        let previous = sendTask
-        let token = sessionGeneration
-        pendingAudioBytes += audioBytes
-        sendTask = Task { [weak self] in
-            await previous?.value
-            guard !Task.isCancelled, self?.sessionGeneration == token else { return }
-            if let searchCallID, self?.cancelledSearchCalls.contains(searchCallID) != false { return }
-            if audioBytes > 0, self?.canSendAudio?() == false {
-                self?.pendingAudioBytes -= audioBytes
-                return
-            }
-            do {
-                try await socket.send(.string(string))
-                self?.pendingAudioBytes -= audioBytes
-            } catch {
-                guard self?.sessionGeneration == token else { return }
-                self?.fail(Self.connectionError(error, socket: socket))
-            }
-        }
-    }
+    // Kept as a small normalized-event seam for deterministic transport tests.
+    func handleEvent(_ value: [String: Any]) { LiveChatEvent.decode(value).forEach(handle) }
 
-    private func handle(_ data: Data) {
-        guard let raw = try? JSONSerialization.jsonObject(with: data) else { return }
-        let events = (raw as? [[String: Any]]) ?? (raw as? [String: Any]).map { [$0] } ?? []
-        for event in events {
-            guard state != .disconnected else { return }
-            handleEvent(event)
-        }
-    }
-
-    // Gateway's realtime codec is an identity mapping over these normalized SDK
-    // events. No Node runtime or provider-specific Gemini wire codec is needed.
-    func handleEvent(_ event: [String: Any]) {
-        guard let type = event["type"] as? String else { return }
-        captureGrounding(event)
-        switch type {
-        case "session-created", "session-updated":
+    private func handle(_ event: LiveChatEvent) {
+        switch event {
+        case .ready:
             guard state == .connecting else { return }
             timeout?.cancel(); timeout = nil
             state = .connected
             onReady?()
-        case "audio-delta":
-            if let encoded = event["delta"] as? String, let bytes = Data(base64Encoded: encoded) { onAudio?(bytes) }
-        case "audio-transcript-delta":
-            guard let text = event["delta"] as? String else { return }
-            outputTranscript = String((outputTranscript + text).prefix(8000))
-            if let index = assistantIndex, messages.indices.contains(index) { messages[index].text = outputTranscript }
-            else { messages.append(.init(role: "assistant", text: outputTranscript, sources: responseSources)); assistantIndex = messages.count - 1 }
-            onTranscript?(outputTranscript)
-        case "audio-transcript-done":
-            if let text = event["transcript"] as? String, !text.isEmpty {
-                outputTranscript = String(text.prefix(8000))
-                if let index = assistantIndex, messages.indices.contains(index) { messages[index].text = outputTranscript }
-                else { messages.append(.init(role: "assistant", text: outputTranscript, sources: responseSources)); assistantIndex = messages.count - 1 }
-                onTranscript?(outputTranscript)
-            }
-        case "input-transcription-completed":
-            if let text = event["transcript"] as? String, !text.isEmpty {
+        case .audio(let bytes): onAudio?(bytes)
+        case .transcriptDelta(let text): updateTranscript(String((outputTranscript + text).prefix(8000)))
+        case .transcriptDone(let text): if !text.isEmpty { updateTranscript(String(text.prefix(8000))) }
+        case .userTranscript(let text):
+            if !text.isEmpty {
                 messages.append(.init(role: "user", text: String(text.prefix(4000))))
                 addHistory(role: "user", text: text)
             }
-        case "response-done":
+        case .responseDone:
             if !outputTranscript.isEmpty { addHistory(role: "assistant", text: outputTranscript) }
             outputTranscript = ""; assistantIndex = nil; responseSources = []
             onResponseDone?()
-        case "speech-started":
+        case .interrupted:
             onInterruption?(); outputTranscript = ""; assistantIndex = nil; responseSources = []
-        case "function-call-arguments-done": handleSearchCall(event)
-        case "custom": cancelSearchCalls(event)
-        case "error":
-            // Do not echo arbitrary provider text that might contain request details.
-            fail("Gemini Live reported an error. Check your Gateway key, credits, and model access in Settings.")
-        default: break
+        case .toolCall(let id, let name, let arguments):
+            guard name == "web_search" else {
+                client?.sendToolResult(id: id, name: name, output: "{\"error\":\"Unknown tool. Only web_search is available.\"}")
+                return
+            }
+            handleSearchCall(["callId": id, "name": name, "arguments": arguments])
+        case .toolsCancelled(let ids): cancelSearchCalls(ids)
+        case .grounding(let sources, let searched):
+            if searched || !sources.isEmpty { hasSearched = true }
+            for source in sources where !responseSources.contains(where: { $0.id == source.id }) && responseSources.count < 12 {
+                responseSources.append(source)
+            }
+            if let index = assistantIndex, messages.indices.contains(index) { messages[index].sources = responseSources }
+        case .failed(let message): fail(message)
         }
         if messages.count > 100 {
             let count = messages.count - 100
             messages.removeFirst(count)
             assistantIndex = assistantIndex.map { $0 - count }
         }
+    }
+
+    private func updateTranscript(_ text: String) {
+        outputTranscript = text
+        if let index = assistantIndex, messages.indices.contains(index) { messages[index].text = text }
+        else { messages.append(.init(role: "assistant", text: text, sources: responseSources)); assistantIndex = messages.count - 1 }
+        onTranscript?(text)
     }
 
     private func handleSearchCall(_ event: [String: Any]) {
@@ -337,7 +252,7 @@ final class LiveClient: ObservableObject {
             return
         }
         let generation = sessionGeneration
-        let key = activeKey
+        guard let tool = profile?.capabilities.search else { return }
         searchTasks[callID] = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -347,7 +262,7 @@ final class LiveClient: ObservableObject {
                 }
             }
             do {
-                let result = try await self.api.searchWeb(key: key, query: query)
+                let result = try await tool.search(WebSearchArguments(query: query))
                 guard !Task.isCancelled, self.sessionGeneration == generation else { return }
                 self.hasSearched = true
                 for source in result.sources where !self.responseSources.contains(where: { $0.id == source.id }) && self.responseSources.count < 12 {
@@ -367,13 +282,10 @@ final class LiveClient: ObservableObject {
         isSearching = true
     }
 
-    private func cancelSearchCalls(_ event: [String: Any]) {
-        guard event["rawType"] as? String == "toolCallCancellation",
-              let raw = event["raw"] as? [String: Any],
-              let cancellation = raw["toolCallCancellation"] as? [String: Any],
-              let callIDs = cancellation["ids"] as? [String] else { return }
+    private func cancelSearchCalls(_ callIDs: [String]) {
         for callID in callIDs.prefix(64) where handledSearchCalls.contains(callID) {
             cancelledSearchCalls.insert(callID)
+            client?.cancelTool(callID)
             searchTasks.removeValue(forKey: callID)?.cancel()
             updateToolCall(callID: callID, status: .cancelled, result: "The tool call was cancelled.")
         }
@@ -408,25 +320,7 @@ final class LiveClient: ObservableObject {
         updateToolCall(callID: callID, status: failure == nil ? .completed : .failed,
                        result: failure ?? result["text"] as? String, sources: sources)
         guard let data = try? JSONSerialization.data(withJSONObject: result) else { return }
-        send(["type": "conversation-item-create", "item": ["type": "function-call-output",
-            "callId": callID, "name": "web_search", "output": String(decoding: data, as: UTF8.self)]], searchCallID: callID)
-    }
-
-    private func captureGrounding(_ event: [String: Any]) {
-        // Gateway preserves Gemini's wire payload on every normalized event,
-        // including audio events. Grounding can arrive before or after text.
-        let raw = event["raw"] as? [String: Any]
-        let content = raw?["serverContent"] as? [String: Any]
-        guard let metadata = (content?["groundingMetadata"] ?? raw?["groundingMetadata"] ?? event["groundingMetadata"]) as? [String: Any] else { return }
-        if let queries = metadata["webSearchQueries"] as? [String], !queries.isEmpty { hasSearched = true }
-        for chunk in (metadata["groundingChunks"] as? [[String: Any]] ?? []).prefix(20) {
-            guard let web = chunk["web"] as? [String: Any], let uri = web["uri"] as? String,
-                  let source = WebSource(urlString: uri, title: web["title"] as? String),
-                  !responseSources.contains(where: { $0.id == source.id }), responseSources.count < 12 else { continue }
-            responseSources.append(source)
-            hasSearched = true
-        }
-        if let index = assistantIndex, messages.indices.contains(index) { messages[index].sources = responseSources }
+        client?.sendToolResult(id: callID, name: "web_search", output: String(decoding: data, as: UTF8.self))
     }
 
     private func addHistory(role: String, text: String) {
@@ -434,8 +328,13 @@ final class LiveClient: ObservableObject {
         requestPose()
     }
 
+    func cancelPoseSelection() {
+        poseTask?.cancel(); poseTask = nil; poseRevision += 1
+        poseSource = "Manual"; poseConfidence = nil
+    }
+
     private func requestPose() {
-        guard automaticallyChoosePoses, state == .connected, !activeKey.isEmpty, let companion else { return }
+        guard automaticallyChoosePoses, state == .connected, let companion else { return }
         poseRevision += 1
         guard poseTask == nil else { return }
         let generation = sessionGeneration
@@ -447,16 +346,18 @@ final class LiveClient: ObservableObject {
                 let interactionRevision = self.interactionHistory.revision
                 handled = revision
                 do {
-                    let result = try await self.api.choosePose(key: self.activeKey, interactions: self.interactionHistory.events, companion: companion)
+                    let result: PoseDecision
+                    if let choosePose = self.choosePose { result = try await choosePose(self.interactionHistory.events, companion) }
+                    else { result = try await self.api.choosePose(key: self.activeKey, interactions: self.interactionHistory.events, companion: companion) }
                     guard !Task.isCancelled, self.sessionGeneration == generation else { return }
                     if self.automaticallyChoosePoses, revision == self.poseRevision,
                        interactionRevision == self.interactionHistory.revision {
-                        self.poseSource = "Jev"; self.poseConfidence = result.confidence; self.onPose?(result.pose)
+                        self.poseSource = self.decisionSource?() ?? "Jev (cloud)"; self.poseConfidence = result.confidence; self.onPose?(result.pose)
                     }
                 } catch {
                     guard !Task.isCancelled, self.sessionGeneration == generation else { return }
                     if revision == self.poseRevision, interactionRevision == self.interactionHistory.revision {
-                        self.error = "Jev could not choose a pose. Manual poses still work."
+                        self.error = error.localizedDescription
                     }
                 }
             }

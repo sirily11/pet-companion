@@ -5,7 +5,7 @@ import SwiftUI
 struct DesktopPetView: View {
     @ObservedObject var behavior: DesktopPetBehavior
     @ObservedObject var voice: DesktopPetVoiceState
-    @ObservedObject private var live: LiveClient
+    @ObservedObject private var live: ConversationSession
     @ObservedObject private var audio: AudioController
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -26,7 +26,7 @@ struct DesktopPetView: View {
     private var bubbleText: String? {
         if let error = conversationError { return error }
         if voice.isRequestingMicrophone { return "Getting ready to listen…" }
-        if live.state == .connecting { return "Connecting to Gemini Live…" }
+        if live.state == .connecting { return "Connecting to the voice model…" }
         if live.state == .connected {
             if let reply = voice.reply, !reply.isEmpty { return reply }
             return audio.isMicrophoneEnabled ? "I’m listening. Say hello!" : "Microphone muted."
@@ -35,7 +35,7 @@ struct DesktopPetView: View {
     }
     private var conversationButtonTitle: String {
         if voice.isRequestingMicrophone || live.state == .connecting { return "Cancel connection" }
-        return live.state == .connected ? "End Gemini Live conversation" : "Talk with Gemini Live"
+        return live.state == .connected ? "End voice conversation" : "Talk with your pet"
     }
     private static let accent = Color(red: 0.76, green: 0.36, blue: 0.20)
     private var voiceControlTransition: AnyTransition {
@@ -90,7 +90,7 @@ struct DesktopPetView: View {
                             .padding(.horizontal, 16)
                             .background(DesktopPetHitRegion())
                     }
-                    .accessibilityAction(named: "Talk with Gemini Live") { voice.onToggleConversation?() }
+                    .accessibilityAction(named: "Talk with your pet") { voice.onToggleConversation?() }
                     .accessibilityAction(named: "Hide desktop pet", onHide)
             }
 

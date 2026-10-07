@@ -16,7 +16,7 @@ jobs:
       - run: brew install xcodegen
       - run: xcodegen generate
       - name: Run app tests
-        run: xcodebuild -project CatCompanion.xcodeproj -scheme CatCompanion -destination 'platform=macOS' -derivedDataPath output/Tests CODE_SIGN_IDENTITY=- test
+        run: xcodebuild -project CatCompanion.xcodeproj -scheme CatCompanion -destination 'platform=macOS' -derivedDataPath output/Tests CODE_SIGN_IDENTITY=- ENABLE_APP_SANDBOX=NO CODE_SIGN_ENTITLEMENTS='' test
       - uses: actions/setup-python@v7
         with:
           python-version: '3.x'

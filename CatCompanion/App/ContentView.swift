@@ -39,7 +39,7 @@ struct ContentView: View {
                 Button { coordinator.showingSettings = true } label: { Label("Settings", systemImage: "gearshape") }
             }
         }
-        .sheet(isPresented: $coordinator.showingSettings) { GatewaySettingsView(settings: coordinator.settings, onChange: coordinator.settingsDidChange) }
+        .sheet(isPresented: $coordinator.showingSettings) { GatewaySettingsView(settings: coordinator.settings, models: coordinator.localModelStore, onChange: coordinator.settingsDidChange, onDecisionChange: coordinator.decisionSettingsDidChange) }
         .sheet(isPresented: Binding(
             get: { coordinator.showingImport && !coordinator.showingPets },
             set: { coordinator.showingImport = $0 }
@@ -347,7 +347,7 @@ private struct JointSlider: View {
 }
 
 private struct ConversationPanel: View {
-    @ObservedObject var live: LiveClient
+    @ObservedObject var live: ConversationSession
     @ObservedObject var audio: AudioController
     @ObservedObject var coordinator: CompanionCoordinator
     @State private var draft = ""
@@ -358,7 +358,7 @@ private struct ConversationPanel: View {
                 Spacer()
                 Circle().fill(live.state == .connected ? .green : ink.opacity(0.2)).frame(width: 7, height: 7)
             }
-            Text(live.state == .connected ? "Gemini Live is here. Say hello." : "Talk, wonder, or just say hello.")
+            Text(live.state == .connected ? "\(live.provider == .gemini ? "Gemini Live" : "GPT Realtime") is here. Say hello." : "Talk, wonder, or just say hello.")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             ScrollViewReader { proxy in
                 ScrollView {
@@ -404,6 +404,8 @@ private struct ConversationPanel: View {
                 }.foregroundStyle(accent).padding(12).background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
             }
             VStack(spacing: 12) {
+                VoiceModelPicker(settings: coordinator.settings, catalog: coordinator.modelCatalog,
+                                 coordinator: coordinator)
                 HStack {
                     Toggle("Conversation poses", isOn: $coordinator.automaticPoses).font(.system(size: 11)).toggleStyle(.checkbox)
                     Spacer()

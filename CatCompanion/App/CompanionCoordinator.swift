@@ -9,8 +9,11 @@ final class CompanionCoordinator: ObservableObject {
     private let companionStore: CompanionStore
     private var noticeTask: Task<Void, Never>?
     let audio: AudioController
-    let live: LiveClient
+    let live: ConversationSession
     let settings: GatewaySettings
+    let modelCatalog: ModelCatalog
+    let localModelStore: OpenJevModelStore
+    let decisions: DecisionRouter
     let desktopPet: DesktopPetController
     let reactions: PetReactionBrain
     private var subscriptions = Set<AnyCancellable>()
@@ -29,14 +32,25 @@ final class CompanionCoordinator: ObservableObject {
     init(companionStore: CompanionStore = CompanionStore(), settings: GatewaySettings? = nil,
          decideReaction: PetReactionBrain.Decide? = nil) {
         let audio = AudioController()
-        let live = LiveClient()
+        let live = ConversationSession()
         let settings = settings ?? GatewaySettings()
+        let modelStore = OpenJevModelStore()
+        let decisions = DecisionRouter(settings: settings, modelStore: modelStore)
         self.audio = audio
         self.live = live
         self.settings = settings
-        self.reactions = PetReactionBrain(history: live.interactionHistory, key: { try settings.key() }, decide: decideReaction)
+        self.modelCatalog = ModelCatalog()
+        self.localModelStore = modelStore
+        self.decisions = decisions
+        self.reactions = PetReactionBrain(history: live.interactionHistory,
+            key: { settings.decisionBackend == .cloud ? try settings.key() : "" },
+            decide: decideReaction ?? { _, interactions, package in try await decisions.chooseReaction(interactions, package) })
+        live.choosePose = { interactions, package in try await decisions.choosePose(interactions, package) }
+        live.decisionSource = { decisions.name }
+        live.provider = settings.provider; live.model = settings.selectedModel
         self.desktopPet = DesktopPetController(voice: DesktopPetVoiceState(live: live, audio: audio))
         self.companionStore = companionStore
+        modelStore.onWillRemove = { [weak self] in self?.decisionSettingsDidChange() }
         desktopPet.onShowCharacter = { [weak self] character in self?.reactions.bind(character, surface: "desktop") }
         desktopPet.behavior.onRequestMood = { [weak self] in
             guard let self, let character = self.desktopPet.behavior.character else { return }
@@ -75,6 +89,7 @@ final class CompanionCoordinator: ObservableObject {
         }
         live.onReady = { [weak self] in
             guard let self else { return }
+            self.audio.inputSampleRate = Double(self.live.audioFormat.inputSampleRate)
             do { try self.audio.startCapture() }
             catch { self.live.disconnect(); self.live.error = error.localizedDescription }
         }
@@ -106,6 +121,11 @@ final class CompanionCoordinator: ObservableObject {
     func connect() async {
         guard !isRequestingMicrophone, !isImporting, live.state == .disconnected else { return }
         guard character.package != nil else { showingImport = true; return }
+        guard modelCatalog.contains(settings.selectedModel, provider: settings.provider) else {
+            live.error = "The selected model is unavailable. Choose another model in the conversation panel."
+            return
+        }
+        voiceSelectionDidChange()
         let attempt = UUID()
         connectionAttempt = attempt
         desktopPet.voice.hasAttemptedConversation = true
@@ -230,7 +250,22 @@ final class CompanionCoordinator: ObservableObject {
         live.disconnect()
     }
 
+    func voiceSelectionDidChange() {
+        guard live.state == .disconnected else { return }
+        live.provider = settings.provider; live.model = settings.selectedModel
+    }
+
+    func decisionSettingsDidChange() {
+        decisions.cancel()
+        reactions.cancel()
+        live.cancelPoseSelection()
+        character.clearInteraction()
+        desktopPet.behavior.character?.clearInteraction()
+        if settings.decisionBackend == .cloud { Task { await localModelStore.runtime.unload() } }
+    }
+
     func settingsDidChange() {
+        decisions.cancel()
         reactions.cancel()
         character.clearInteraction()
         desktopPet.behavior.character?.clearInteraction()

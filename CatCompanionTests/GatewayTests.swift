@@ -35,6 +35,7 @@ final class FakeGatewaySocket: GatewaySocketTransport {
     var closeCode: URLSessionWebSocketTask.CloseCode = .invalid
     var closeReason: Data?
     var receiveError: Error?
+    var rejectsTurnDetection = true
     var sessionReadyEvent = "session-updated"
     var sent: [[String: Any]] = []
     private var pending: CheckedContinuation<URLSessionWebSocketTask.Message, Error>?
@@ -53,7 +54,7 @@ final class FakeGatewaySocket: GatewaySocketTransport {
         if event["type"] as? String == "session-update" {
             // Both overrides reproduce confirmed live Gateway transform rejections.
             if let config = event["config"] as? [String: Any],
-               config["turnDetection"] != nil || (config["providerOptions"] as? [String: Any])?["tools"] != nil {
+               rejectsTurnDetection && config["turnDetection"] != nil || (config["providerOptions"] as? [String: Any])?["tools"] != nil {
                 closeCode = .policyViolation
                 closeReason = Data("WebSocket transform rejected frame".utf8)
                 throw NSError(domain: NSPOSIXErrorDomain, code: 57)
@@ -133,7 +134,7 @@ final class GatewayTests: XCTestCase {
             return (503, Data("private-provider-details".utf8))
         }
         let socket = FakeGatewaySocket()
-        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        let client = ConversationSession(api: api(), socketFactory: { _, _ in socket })
         client.companion = try TestCompanion.package()
         client.automaticallyChoosePoses = false
         let ready = expectation(description: "Search session ready")
@@ -269,7 +270,7 @@ final class GatewayTests: XCTestCase {
 
     @MainActor func testCompletedConversationTurnsSharePetGestureHistoryAcrossDisconnect() async throws {
         let memory = PetInteractionHistory()
-        let client = LiveClient(interactionHistory: memory)
+        let client = ConversationSession(interactionHistory: memory)
         client.companion = try TestCompanion.package()
         client.automaticallyChoosePoses = false
         memory.append(.init(gesture: .tap, surface: "desktop"))
@@ -288,7 +289,7 @@ final class GatewayTests: XCTestCase {
     @MainActor func testGroundingSourcesAttachToTheirReplyAndRejectUnsafeLinks() async throws {
         GatewayURLProtocol.handler = { _ in (200, Data(#"{"token":"vcst_test-secret"}"#.utf8)) }
         let socket = FakeGatewaySocket()
-        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        let client = ConversationSession(api: api(), socketFactory: { _, _ in socket })
         client.companion = try TestCompanion.package()
         client.automaticallyChoosePoses = false
         let ready = expectation(description: "Search session ready")
@@ -343,7 +344,7 @@ final class GatewayTests: XCTestCase {
         GatewayURLProtocol.handler = { _ in (200, Data(#"{"token":"vcst_test-secret"}"#.utf8)) }
         let socket = FakeGatewaySocket()
         socket.sessionReadyEvent = "session-created"
-        let client = LiveClient(api: api(), socketFactory: { url, protocols in
+        let client = ConversationSession(api: api(), socketFactory: { url, protocols in
             XCTAssertEqual(url.host, "ai-gateway.vercel.sh")
             XCTAssertEqual(protocols.last, "ai-gateway-auth.vcst_test-secret")
             return socket
@@ -394,7 +395,7 @@ final class GatewayTests: XCTestCase {
     @MainActor func testMicrophonePacketsAreDroppedWhileReplyPlaysAndResumeAfterward() async throws {
         GatewayURLProtocol.handler = { _ in (200, Data(#"{"token":"vcst_test-secret"}"#.utf8)) }
         let socket = FakeGatewaySocket()
-        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        let client = ConversationSession(api: api(), socketFactory: { _, _ in socket })
         client.companion = try TestCompanion.package()
         client.automaticallyChoosePoses = false
         let ready = expectation(description: "Connected for microphone gating")
@@ -428,7 +429,7 @@ final class GatewayTests: XCTestCase {
         socket.closeCode = .policyViolation
         socket.closeReason = Data("WebSocket transform rejected frame".utf8)
         socket.receiveError = NSError(domain: NSPOSIXErrorDomain, code: 57)
-        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        let client = ConversationSession(api: api(), socketFactory: { _, _ in socket })
         var started = false
         let closed = expectation(description: "Rejected connection cleaned up")
         client.onDisconnect = { if started { closed.fulfill() } }
@@ -450,7 +451,7 @@ final class GatewayTests: XCTestCase {
         socket.response = HTTPURLResponse(url: GatewayAPI.realtimeURL(), statusCode: 401, httpVersion: nil, headerFields: nil)
         socket.closeReason = Data("sensitive-provider-details vcst_test-secret".utf8)
         socket.receiveError = URLError(.badServerResponse)
-        let client = LiveClient(api: api(), socketFactory: { _, _ in socket })
+        let client = ConversationSession(api: api(), socketFactory: { _, _ in socket })
         var started = false
         let closed = expectation(description: "Unauthorized connection cleaned up")
         client.onDisconnect = { if started { closed.fulfill() } }
@@ -476,5 +477,77 @@ final class GatewayTests: XCTestCase {
             data.append(contentsOf: buffer.prefix(count))
         }
         return try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    }
+}
+
+
+extension GatewayTests {
+    @MainActor func testGPTSelectedModelAudioAndExplicitContinuations() async throws {
+        GatewayURLProtocol.handler = { request in
+            let body = try self.body(of: request)
+            XCTAssertEqual(body["model"] as? String, "openai/gpt-realtime-mini")
+            return (200, Data(#"{"token":"vcst_test-secret"}"#.utf8))
+        }
+        let socket = FakeGatewaySocket()
+        socket.rejectsTurnDetection = false
+        let session = ConversationSession(api: api(), socketFactory: { url, _ in
+            XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, "openai/gpt-realtime-mini")
+            return socket
+        })
+        session.provider = .gpt; session.model = "openai/gpt-realtime-mini"
+        session.companion = try TestCompanion.package(); session.automaticallyChoosePoses = false
+        let ready = expectation(description: "GPT ready"); session.onReady = { ready.fulfill() }
+        await session.connect(key: "test-key")
+        await fulfillment(of: [ready], timeout: 2)
+        let config = try XCTUnwrap(socket.sent.first?["config"] as? [String: Any])
+        XCTAssertEqual((config["inputAudioFormat"] as? [String: Any])?["rate"] as? Int, 24_000)
+        XCTAssertEqual(config["voice"] as? String, "alloy")
+        XCTAssertEqual((config["turnDetection"] as? [String: Any])?["type"] as? String, "server-vad")
+        session.sendText("Hello")
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(socket.sent.filter { $0["type"] as? String == "response-create" }.count, 1)
+        GatewayURLProtocol.handler = { _ in
+            (200, Data(#"{"content":[{"type":"text","text":"Verified fact"},{"type":"source","sourceType":"url","url":"https://example.com","title":"Example"}]}"#.utf8))
+        }
+        socket.feed(["type": "function-call-arguments-done", "name": "web_search", "callId": "gpt-search", "arguments": #"{"query":"news"}"#])
+        for _ in 0..<100 { try await Task.sleep(for: .milliseconds(10)); if !session.isSearching && session.hasSearched { break } }
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(socket.sent.filter { $0["type"] as? String == "response-create" }.count, 2)
+        XCTAssertEqual(session.visibleToolCalls.last?.status, .completed)
+        session.disconnect()
+    }
+
+    @MainActor func testGeminiThinkingConfigurationAndTypedSearchSchema() throws {
+        let package = try TestCompanion.package()
+        let profile = ConversationProfile(companion: package)
+        let config = LiveChatConfiguration(provider: .gemini, model: "google/gemini-3.8-live-extended-thinking", companion: package, profile: profile).sessionEvent["config"] as! [String: Any]
+        let google = (config["providerOptions"] as! [String: Any])["google"] as! [String: Any]
+        XCTAssertEqual((google["thinkingConfig"] as? [String: String])?["thinkingLevel"], "LOW")
+        let parameters = profile.capabilities.search.gatewayDefinition["parameters"] as! [String: Any]
+        XCTAssertEqual(parameters["required"] as? [String], ["query"])
+        XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
+    }
+
+    @MainActor func testModelCatalogFiltersCachesAndKeepsUnavailableSelection() async throws {
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("models.json")
+        defer { try? FileManager.default.removeItem(at: cache.deletingLastPathComponent()) }
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [GatewayURLProtocol.self]
+        let http = URLSession(configuration: configuration)
+        var requests = 0
+        GatewayURLProtocol.handler = { request in
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            XCTAssertEqual(request.url?.path, "/v1/models"); requests += 1
+            return (200, Data(#"{"data":[{"id":"google/gemini-3.8-live","name":"Gemini","type":"realtime","modalities":{"input":["audio"],"output":["audio"]}},{"id":"openai/gpt-realtime-mini","name":"Mini","type":"realtime","modalities":{"input":["audio"],"output":["audio"]}},{"id":"openai/gpt-live-1","name":"Live","type":"realtime","modalities":{"input":["audio"],"output":["audio"]}},{"id":"openai/gpt-realtime-whisper","name":"Transcribe","type":"transcription","modalities":{"input":["audio"],"output":["text"]}}]}"#.utf8))
+        }
+        let catalog = ModelCatalog(session: http, cacheURL: cache)
+        await catalog.refresh()
+        XCTAssertEqual(catalog.models(for: .gpt).map(\.id), ["openai/gpt-realtime-mini"])
+        XCTAssertFalse(catalog.contains("openai/gpt-realtime-2", provider: .gpt))
+        await catalog.refresh(); XCTAssertEqual(requests, 1)
+        let restored = ModelCatalog(session: http, cacheURL: cache)
+        XCTAssertEqual(restored.models, catalog.models)
+        GatewayURLProtocol.handler = { _ in throw URLError(.notConnectedToInternet) }
+        await restored.refresh(force: true)
+        XCTAssertEqual(restored.models, catalog.models); XCTAssertNotNil(restored.error)
     }
 }

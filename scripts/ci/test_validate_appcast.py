@@ -28,13 +28,13 @@ class FeedValidationTests(unittest.TestCase):
         public = base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
         self.plist = directory/'Info.plist'
         self.plist.write_bytes(plistlib.dumps({'CFBundleVersion':'42', 'CFBundleShortVersionString':'1.2.3',
-            'LSMinimumSystemVersion':'14.0', 'SUPublicEDKey':public,
+            'LSMinimumSystemVersion':'27.0', 'SUPublicEDKey':public,
             'SUFeedURL':'https://update.pet.rxlab.app/appcast.xml'}))
         self.prefix = 'https://github.com/sirily11/pet-companion/releases/download/v1.2.3/'
         self.feed = directory/'appcast.xml'
         self.feed.write_text(f'''<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item>
 <sparkle:version>42</sparkle:version><sparkle:shortVersionString>1.2.3</sparkle:shortVersionString>
-<sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+<sparkle:minimumSystemVersion>27.0</sparkle:minimumSystemVersion>
 <sparkle:releaseNotesLink>https://update.pet.rxlab.app/PetCompanion.html</sparkle:releaseNotesLink>
 <enclosure url="{self.prefix}PetCompanion.dmg" length="{self.archive.stat().st_size}" sparkle:edSignature="{signature}"/>
 </item></channel></rss>''')
@@ -59,7 +59,7 @@ class FeedValidationTests(unittest.TestCase):
         with self.assertRaises(InvalidSignature): self.validate()
 
     def test_wrong_metadata(self):
-        for old,new in [('>42<','>43<'), ('>1.2.3<','>1.2.4<'), ('>14.0<','>15.0<'),
+        for old,new in [('>42<','>43<'), ('>1.2.3<','>1.2.4<'), ('>27.0<','>28.0<'),
                         ('PetCompanion.html','Other.html'), ('PetCompanion.dmg','Other.dmg')]:
             with self.subTest(old=old):
                 original = self.feed.read_text()

@@ -2,13 +2,15 @@ name: CatCompanion
 options:
   bundleIdPrefix: com.rxlab
   deploymentTarget:
-    macOS: '14.0'
+    macOS: '27.0'
   createIntermediateGroups: true
+  preGenCommand: ./scripts/dependencies/prepare-mlx.sh
   postGenCommand: perl -pi -e 's/lastKnownFileType = wrapper\.icon;/lastKnownFileType = folder.iconcomposer.icon;/g' CatCompanion.xcodeproj/project.pbxproj
 settings:
   base:
     SWIFT_VERSION: '5.0'
-    MACOSX_DEPLOYMENT_TARGET: '14.0'
+    MACOSX_DEPLOYMENT_TARGET: '27.0'
+    ARCHS: arm64
     CODE_SIGN_STYLE: Automatic
     ENABLE_APP_SANDBOX: YES
     SWIFT_STRICT_CONCURRENCY: targeted
@@ -21,6 +23,14 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.10.0
+  Tokenizers:
+    url: https://github.com/huggingface/swift-transformers
+    exactVersion: 1.3.4
+  MLXLM:
+    path: build/native-mlx-swift-lm
+  MLX:
+    url: https://github.com/ml-explore/mlx-swift
+    exactVersion: 0.32.3
 targets:
   CatCompanion:
     type: application
@@ -39,7 +49,7 @@ targets:
         CFBundleDisplayName: PetPaw
         CFBundleName: PetPaw
         LSApplicationCategoryType: public.app-category.entertainment
-        NSMicrophoneUsageDescription: Talk to your cat with Gemini Live.
+        NSMicrophoneUsageDescription: Talk to your pet with the selected voice model.
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         SUFeedURL: https://update.pet.rxlab.app/appcast.xml
@@ -61,6 +71,16 @@ targets:
           - $(PRODUCT_BUNDLE_IDENTIFIER)-spki
     dependencies:
       - package: Sparkle
+      - package: MLXLM
+        product: MLXLLM
+      - package: MLXLM
+        product: MLXLMCommon
+      - package: MLX
+        product: MLX
+      - package: MLX
+        product: MLXNN
+      - package: Tokenizers
+        product: Tokenizers
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rxlab.CatCompanion

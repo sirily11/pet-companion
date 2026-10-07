@@ -9,7 +9,7 @@ xcodegen generate
 xcodebuild -project CatCompanion.xcodeproj -scheme CatCompanion \
   -configuration Release -destination 'generic/platform=macOS' \
   -archivePath output/PetCompanion.xcarchive -derivedDataPath output/DerivedData \
-  ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
+  ARCHS='arm64' ONLY_ACTIVE_ARCH=NO \
   CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$SIGNING_CERTIFICATE_NAME" \
   DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
   OTHER_CODE_SIGN_FLAGS='--options=runtime --timestamp' \

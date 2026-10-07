@@ -16,6 +16,7 @@ final class AudioController: ObservableObject {
     private let playbackEngine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let synthesizer = AVSpeechSynthesizer()
+    var inputSampleRate: Double = 16_000
     private let outputFormat = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
     private var queuedFrames: AVAudioFrameCount = 0
     private var generation = UUID()
@@ -78,14 +79,15 @@ final class AudioController: ObservableObject {
         let input = captureEngine.inputNode
         let sourceFormat = input.outputFormat(forBus: 0)
         guard sourceFormat.sampleRate > 0, sourceFormat.channelCount > 0,
-              let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true),
+              let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: inputSampleRate, channels: 1, interleaved: true),
               let converter = AVAudioConverter(from: sourceFormat, to: targetFormat) else {
             throw AudioError.noInput
         }
         captureGeneration = UUID()
         let token = captureGeneration
+        let captureSampleRate = inputSampleRate
         input.installTap(onBus: 0, bufferSize: 1024, format: sourceFormat) { [weak self] buffer, _ in
-            let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * 16_000 / sourceFormat.sampleRate)) + 32
+            let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * captureSampleRate / sourceFormat.sampleRate)) + 32
             guard let output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
             var consumed = false
             var conversionError: NSError?
